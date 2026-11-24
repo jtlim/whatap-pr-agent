@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { replaySavedRun } from './fixtures/replay.mjs';
 import { loadConfig } from '../dist/config.js';
 import { runAgentHarness, isBoundaryOnlyShift } from '../dist/agent.js';
 
 async function runBoundary(codexMode='',referenceMode='') {
  const tmp=await mkdtemp(join(tmpdir(),'boundary-realign-'));
- const {config}=await loadConfig(resolve('config/harness.json'));
+ const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
  config.servers.reference=resolve(`test/mock-reference-boundary-error${referenceMode?'-'+referenceMode:''}.mjs`);
  config.outputDir=tmp;
  const cmd=resolve(`test/mock-codex-boundary-error${codexMode?'-'+codexMode:''}.mjs`);
@@ -17,9 +17,6 @@ async function runBoundary(codexMode='',referenceMode='') {
    requestOverride:'프로젝트 5490 최근 5분 오류 시계열 전체 조회',
    command:process.execPath,commandArgs:[cmd]});
  return {tmp,report,detail:report.scenarios[0]};
-}
-async function replay(runDir) {
- return spawnSync(process.execPath,['tools/replay-run.mjs',runDir],{encoding:'utf8'});
 }
 test('aligned single-bucket shift is retried +1ms and ALL 60 row values and summary match independently',async()=>{
  const {tmp,report,detail}=await runBoundary();
@@ -39,7 +36,7 @@ test('aligned single-bucket shift is retried +1ms and ALL 60 row values and summ
   const md=await readFile(join(report.runDir,'report.md'),'utf8');
   assert.match(md,/경계 보정/);
   assert.match(md,/최초 HTTP 범위/);
-  const rr=await replay(report.runDir);
+  const rr=replaySavedRun(report.runDir);
   assert.equal(rr.status,0,rr.stdout+'\n'+rr.stderr);
   assert.match(rr.stdout,/재검증=PASS/);
  } finally {await rm(tmp,{recursive:true,force:true});}
@@ -56,7 +53,7 @@ test('historical incident: first aligned query realigns, second unaligned query 
   assert.equal(second.reference.boundaryAlignment,undefined);
   assert.equal(first.candidate.parsedRows,60);
   assert.equal(second.candidate.parsedRows,60);
-  const rr=await replay(report.runDir);
+  const rr=replaySavedRun(report.runDir);
   assert.equal(rr.status,0,rr.stdout+'\n'+rr.stderr);
   assert.match(rr.stdout,/재검증 2개 MCP 호출/);
  } finally {await rm(tmp,{recursive:true,force:true});}
@@ -71,7 +68,7 @@ test('if backend discards request milliseconds, retry +1000ms then PASS',async()
   assert.equal(a.attempts.length,2);
   assert.notEqual(a.attempts[0].status,'PASS');
   assert.equal(a.attempts[1].status,'PASS');
-  const rr=await replay(report.runDir);
+  const rr=replaySavedRun(report.runDir);
   assert.equal(rr.status,0,rr.stderr+'\n'+rr.stdout);
  } finally {await rm(tmp,{recursive:true,force:true});}
 });
@@ -90,7 +87,7 @@ test('wrong endpoint value cannot be turned into PASS by a shifted HTTP query',a
   const a=detail.reference.boundaryAlignment;
   assert.equal(a.selectedDeltaMs,undefined);
   assert.ok(a.attempts.every(x=>x.status==='FAIL'));
-  const rr=await replay(report.runDir);
+  const rr=replaySavedRun(report.runDir);
   assert.equal(rr.status,0,rr.stderr+'\n'+rr.stdout);
   assert.match(rr.stdout,/보고서=FAIL \/ 재검증=FAIL/);
  }finally{await rm(tmp,{recursive:true,force:true});}
@@ -107,7 +104,7 @@ test('replay detects corruption of original HTTP evidence after successful re-al
  try {
   const orig=join(report.runDir,detail.reference.boundaryAlignment.original.file);
   await writeFile(orig,'{}\n');
-  const rr=await replay(report.runDir);
+  const rr=replaySavedRun(report.runDir);
   assert.notEqual(rr.status,0);
   assert.match(rr.stderr,/증거 파일 손상/);
  }finally{await rm(tmp,{recursive:true,force:true});}

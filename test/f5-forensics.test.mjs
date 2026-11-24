@@ -16,7 +16,7 @@ const fixture=async fn=>{const root=await mkdtemp(join(tmpdir(),'whatap-f5-'));
  try{return await fn(root);}finally{await rm(root,{recursive:true,force:true});}};
 const start=1795461900000;
 const scenarioId='apm-transaction-stats';
-async function config(root){const {config:c}=await loadConfig(resolve('config/harness.json'));
+async function config(root){const {config:c}=await loadConfig(resolve('test/fixtures/harness.json'));
  c.servers.reference=resolve('test/mock-reference-statistics.mjs');
  c.servers.candidate=resolve('test/mock-codex-statistics.mjs');
  c.outputDir=root;c.rpcTimeoutMs=15000;return c;}

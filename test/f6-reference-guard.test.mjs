@@ -1,3 +1,4 @@
+import { replaySavedRun } from './fixtures/replay.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,readFile,rm} from 'node:fs/promises';
@@ -15,7 +16,7 @@ const sha=s=>createHash('sha256').update(s).digest('hex');
 const withRoot=async fn=>{const root=await mkdtemp(join(tmpdir(),'f6-reference-'));try{return await fn(root);}finally{await rm(root,{recursive:true,force:true});}};
 const scenario='apm-transaction-stats';
 async function config(root){
- const {config:c}=await loadConfig(resolve('config/harness.json'));
+ const {config:c}=await loadConfig(resolve('test/fixtures/harness.json'));
  c.servers.reference=resolve('test/mock-reference-statistics.mjs');
  c.servers.candidate=resolve('test/mock-codex-statistics.mjs');
  c.outputDir=root;c.rpcTimeoutMs=15000;c.replayPolicy='PERIOD_PAIRED';return c;
@@ -120,8 +121,7 @@ test('F6: F5 legacy reference-only FAIL report replays without rewriting the his
   doc.scenarios[0].status='FAIL';doc.scenarios[0].reason='STATS_AGGREGATE_DIFFERENCE';
   doc.totals={PASS:0,FAIL:1,UNVERIFIABLE:0,UNMAPPED:0,UNSUPPORTED:0};
   await writeFile(file,JSON.stringify(doc)+'\n');
-  const {spawnSync}=await import('node:child_process');
-  const replay=spawnSync(process.execPath,['tools/replay-run.mjs',r.runDir],{cwd:resolve('.'),encoding:'utf8'});
+  const replay=replaySavedRun(r.runDir);
   assert.equal(replay.status,0,replay.stderr+'\n'+replay.stdout);
   assert.match(replay.stdout,/F5 레거시 FAIL=F6 기준 불일치/);
   assert.match(replay.stdout,/판정 불일치\/증거 오류 0개/);

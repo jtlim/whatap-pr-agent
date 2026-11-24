@@ -113,7 +113,7 @@ export async function codexEdit(worktree:string,prompt:string,dir:string,ordinal
   let stderr='',expired=false,outputTooLarge=false,bytes=0;
   child.stdout.on('data',(b:Buffer)=>{bytes+=b.length;if(bytes>2*1024*1024)outputTooLarge=true;});
   child.stderr.on('data',(b:Buffer)=>{if(stderr.length<8192)stderr+=b.toString('utf8');});
-  const timeout=setTimeout(()=>{expired=true;child.kill('SIGTERM');setTimeout(()=>child.kill('SIGKILL'),3000).unref();},600000);
+  const timeout=setTimeout(()=>{expired=true;child.kill('SIGTERM');setTimeout(()=>child.kill('SIGKILL'),3000).unref();},900_000);
   let code:number;
   try{code=await new Promise((ok,fail)=>{child.once('error',fail);child.once('close',c=>ok(c??-1));});}
   finally{clearTimeout(timeout);}

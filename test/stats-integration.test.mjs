@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
-import {spawnSync} from 'node:child_process';
+import { replaySavedRun } from './fixtures/replay.mjs';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {loadConfig} from '../dist/config.js';
@@ -10,7 +10,7 @@ import {runAgentHarness} from '../dist/agent.js';
 async function runStat(mode='transaction',options={}){
  const tmp=await mkdtemp(join(tmpdir(),'whatap-stat-integ-'));
  try{
-  const {config}=await loadConfig(resolve('config/harness.json'));
+  const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
   config.servers.reference=resolve('test/mock-reference-statistics.mjs');
   config.outputDir=tmp;
   const old=Object.fromEntries(Object.entries(options.env??{}).map(([k])=>[k,process.env[k]]));
@@ -40,7 +40,7 @@ for(const mode of ['transaction','exception']){
  test(`${mode} restores saved evidence in offline replay`,async()=>{
   const {report,tmp}=await runStat(mode,{preserve:true});
   try{
-   const cp=spawnSync(process.execPath,['tools/replay-run.mjs',report.runDir],{encoding:'utf8'});
+   const cp=replaySavedRun(report.runDir);
    assert.equal(cp.status,0,cp.stderr+'\n'+cp.stdout);
    assert.match(cp.stdout,/보고서=PASS \/ 재검증=PASS/);
    assert.match(cp.stdout,/판정 불일치\/증거 오류 0개/);
@@ -86,7 +86,7 @@ test('offline replay rejects corrupted statistics HTTP evidence',async()=>{
  try{
   const meta=report.scenarios[0].reference.statistics.mxql;
   await writeFile(join(report.runDir,meta.file),'{}');
-  const cp=spawnSync(process.execPath,['tools/replay-run.mjs',report.runDir],{encoding:'utf8'});
+  const cp=replaySavedRun(report.runDir);
   assert.notEqual(cp.status,0);
   assert.match(cp.stderr+/\n/+cp.stdout,/증거 파일 손상/);
  }finally{await rm(tmp,{recursive:true,force:true});}
@@ -100,7 +100,7 @@ test('two valid transaction statistics queries are independently compared and re
   assert.deepEqual(r.callResults.map(x=>x.status),['PASS','PASS']);
   assert.deepEqual(r.callResults.map(x=>x.candidate.parsedRows),[4,6]);
   assert.notEqual(r.callResults[0].reference.statistics.mxql.file,r.callResults[1].reference.statistics.mxql.file);
-  const cp=spawnSync(process.execPath,['tools/replay-run.mjs',report.runDir],{encoding:'utf8'});
+  const cp=replaySavedRun(report.runDir);
   assert.equal(cp.status,0,cp.stderr+'\n'+cp.stdout);
   assert.match(cp.stdout,/재검증 2개 MCP 호출/);
   assert.match(markdown,/MCP 조회 호출 2/);

@@ -155,13 +155,14 @@ test('F8 analysis failure produces local JSON and Markdown without Git submissio
   assert.match(await readFile(join(report.directory, 'assignment.md'), 'utf8'), /AI_EXECUTION_FAILED/);
 });
 
-test('assignment schemas are accepted by the existing read-only and edit subprocess wrappers', async t => {
+test('assignment Codex subprocesses receive EOF and use their respective deadlines', async t => {
   const options = await fixture(t);
   const bin = join(options.worktree, '..', 'bin');
   await mkdir(bin);
   await writeFile(join(bin, 'codex'), `#!${process.execPath}
 const fs = require('node:fs');
 const argv = process.argv;
+if (fs.readSync(0, Buffer.alloc(1), 0, 1, null) !== 0) process.exit(3);
 const schema = JSON.parse(fs.readFileSync(argv[argv.indexOf('--output-schema') + 1]));
 const response = schema.properties.diagnoses ? ${JSON.stringify(diagnose('NO_DEFECT'))} :
   {summary:'수정', rationale:'이유', risks:[], testsRun:[]};
@@ -172,10 +173,12 @@ fs.writeFileSync(argv[argv.indexOf('--output-last-message') + 1], JSON.stringify
   t.after(() => { process.env.PATH = old; });
   const dir = join(options.worktree, '..', 'out', 'tasks', 'task-00000000-00000001');
   await mkdir(dir, { recursive: true });
+  const schedule = t.mock.method(globalThis, 'setTimeout');
   const output = await codexReadOnly(options.worktree, 'test', dir, { properties: { diagnoses: {} } });
   assert.equal(output.diagnoses.length, 5);
   const edit = await codexEdit(options.worktree, 'test', dir, 1);
   assert.equal(edit.summary, '수정');
+  assert.deepEqual(schedule.mock.calls.map(call => call.arguments[1]), [600_000, 900_000]);
 });
 
 function mockAbsoluteTransport(t, mode) {

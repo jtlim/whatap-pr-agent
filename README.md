@@ -1,4 +1,19 @@
-# WhaTap MCP 품질 개선 과제 실행
+# WhaTap MCP 및 Harness 품질 개선 과제 실행
+
+## 자동화 회귀 테스트
+
+GitHub에서 복제한 checkout에서 Node.js 22 이상과 Git을 준비한 뒤 실행합니다.
+
+```bash
+npm ci
+npm test
+```
+
+테스트는 `test/fixtures/`의 설정과 모의 MCP·HTTP 응답을 사용합니다. 실행 증거와 테스트용 Git worktree는 임시 디렉터리에 생성됩니다. 로컬 `config/harness.json`, 과거 `runs/`, 서비스 토큰, Codex 인증 없이 실행할 수 있습니다.
+
+## 실제 서비스 실행
+
+`config/harness.json`에 실제 조회 대상 프로젝트와 시나리오, 빌드된 MCP 및 독립 HTTP Client의 진입점, 결과 저장 경로를 설정합니다. 설정 파일과 서비스 실행 증거는 로컬에 보관합니다.
 
 Ubuntu에서 Node.js 22 이상, Harness와 MCP의 설치된 의존성, 빌드된 HTTP Client, 인증된 Codex CLI를 준비합니다. 서비스 조회 인증은 현재 셸의 `WHATAP_API_TOKEN` 및 `WHATAP_HTTP_API_TOKEN`을 사용합니다. 코드 변경은 별도의 깨끗한 `agent` Git worktree에서 수행합니다.
 
@@ -10,6 +25,45 @@ node tools/run-assignment.mjs --config config/harness.json --worktree /home/ubun
 이 명령은 현재 MCP 소스를 별도 디렉터리에서 빌드하고, 서버 메트릭, APM 트랜잭션·예외 통계, TPS·오류 시계열을 기존 독립 HTTP 비교기로 검증합니다. 다섯 결과와 원본 응답은 판정과 관계없이 읽기 전용 Codex에 전달합니다. 분석은 최대 2회이며, 추가 조회는 최대 2건입니다. 추가 조회는 설정된 프로젝트·도구와 최대 24시간의 과거 구간으로 제한됩니다. MCP 결함으로 분류하고 관련 소스와 독립 조회 근거를 확보한 경우 코드 편집을 1회 실행합니다. 부분 편집이나 검증 실패가 발생하면 편집 내용과 증거를 보존합니다.
 
 수정 후에는 MCP를 새로 빌드하고 기존 MCP 테스트와 다섯 시나리오의 직접 대조를 실행합니다. 수정 대상의 변경 전 독립 불일치와 변경 후 전체 통과가 확인되어야 `VERIFIED`입니다. `PERIOD_PAIRED`에서는 각 MCP 응답의 관측 기간으로 HTTP를 조회합니다. 전후 기간이 다르면 동일한 행에 대한 재현으로 판정하지 않습니다. `FIXED_WINDOW`에서는 MCP 스키마와 정확한 반환 기간을 검증합니다.
+
+## 기존 Harness 결함 조사 및 수정
+
+읽기 전용 분석은 시나리오에 복수의 책임 영역을 기록할 수 있습니다. `MCP_DEFECT`는 MCP worktree, `HARNESS_DEFECT`는 `--harness-worktree`로 지정한 Harness worktree에 연결됩니다. 두 영역이 함께 발견되면 Harness를 먼저 검증하고 MCP 후속 작업을 보고서에 기록합니다. `HTTP_CLIENT_DEFECT`, `API_OR_BACKEND_ISSUE`, `NO_DEFECT`, `INSUFFICIENT_EVIDENCE`에는 원인과 근거, 개선안 또는 추가로 필요한 증거를 남깁니다.
+
+아래 명령의 `whatap-harness-runtime`에는 이 기능이 포함된 검토된 Harness checkout을 별도로 준비하고 의존성을 설치합니다. `whatap-harness-agent`는 깨끗한 별도 `agent` worktree여야 합니다. 기존 실행 checkout은 설정과 과거 증거를 읽는 데 사용합니다. 비교 데이터와 로그는 별도 `--output-dir`에 저장됩니다.
+
+```bash
+cd /home/ubuntu/wpr/whatap-harness-runtime
+node tools/run-assignment.mjs \
+  --config /home/ubuntu/wpr/whatap-harness/config/harness.json \
+  --output-dir /home/ubuntu/wpr/whatap-harness-runtime/runs \
+  --worktree /home/ubuntu/wpr/whatap-open-mcp-agent \
+  --harness-worktree /home/ubuntu/wpr/whatap-harness-agent \
+  --evidence /home/ubuntu/wpr/whatap-harness/runs/assignment-2026-11-24T02-57-52-376Z-9f079dda/assignment.md \
+  --allow-git-submit
+```
+
+과거 `assignment.md`의 동반 `assignment.json`에서 수정 전 보고서 SHA-256을 확인하고, `baseline.json`과 연결된 원본을 읽습니다. 현재 독립 재생 기준은 저장된 MCP 원본의 Markdown과 구조화 기간이 함께 있으며 `MCP_PERIOD_MISSING_OR_INVALID`로 멈춘 경우를 지원합니다. 기존 실행 코드를 통해 실패를 재현한 뒤 별도 빌드 및 전체 회귀를 실행합니다. 저장 응답의 정확한 기간과 현재 MCP 응답의 관측 기간에 대해 실행기가 직접 HTTP를 호출합니다. 실행기가 행, 요약, 기간과 응답 원본을 대조하고 수정 빌드가 같은 결과를 산출하는지 확인합니다. 자동 재현 기준이 없거나 과거 HTTP 데이터가 보존 기간 밖이거나 독립 대조에 실패하면 Git 제출을 진행할 수 없습니다.
+
+`--allow-git-submit`을 사용한 경우에만 검증된 소스를 대상 저장소 `agent`에서 `submission`으로 제출합니다. 원격 및 로컬 worktree가 일치해야 하며 기존 열린 PR은 재사용합니다. 대상은 Harness의 경우 `jtlim/whatap-pr-agent`, MCP의 경우 `jtlim/whatap-open-mcp`입니다. 실제 응답 및 상세 근거는 로컬 아티팩트에 저장되고 PR 본문에는 고정된 요약이 들어갑니다.
+
+## Harness PR 병합 후 기존 MCP 작업 재개
+
+선행 PR이 `submission`에 병합되면 `whatap-harness-runtime` checkout을 해당 병합 커밋을 포함한 검토된 소스로 준비합니다. 보고서에 기록된 Harness PR URL을 환경 변수에 지정합니다. 실행기가 GitHub에서 병합과 브랜치를 확인하고 현재 실행 소스에 병합 커밋이 포함됐는지 검사합니다. 이전 보고서의 목표와 원본 비교 자료를 불러와 MCP의 커밋된 HEAD와 기존 미스테이징 소스 변경을 각각 빌드합니다. 기존 변경으로 상대시간 및 고정 절대시간 독립 검증과 회귀를 실행합니다. 이 재개 명령의 고정 요청은 기존 재생 계약에 따라 초 경계에 정렬됩니다.
+
+```bash
+cd /home/ubuntu/wpr/whatap-harness-runtime
+read -r -p '병합된 Harness PR URL: ' HARNESS_PR_URL
+node tools/run-assignment.mjs \
+  --config /home/ubuntu/wpr/whatap-harness/config/harness.json \
+  --output-dir /home/ubuntu/wpr/whatap-harness-runtime/runs \
+  --worktree /home/ubuntu/wpr/whatap-open-mcp-agent \
+  --evidence /home/ubuntu/wpr/whatap-harness/runs/assignment-2026-11-24T02-57-52-376Z-9f079dda/assignment.md \
+  --resume-mcp-after "$HARNESS_PR_URL" \
+  --allow-git-submit
+```
+
+로컬 검증만 실행하려면 명령에서 `--allow-git-submit`을 생략합니다.
 
 ## 사용자 개선 목표 지정
 

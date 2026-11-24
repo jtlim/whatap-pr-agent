@@ -11,9 +11,10 @@ import { runAgentHarness } from '../dist/agent.js';
 import { StdioMcpClient } from '../dist/mcp.js';
 import { codexReadOnly } from '../dist/phasec.js';
 import { codexEdit, snapshotWorktree } from '../dist/phasec2.js';
+import { alignedStatsWindow } from '../dist/statistics.js';
+import { start, end, ftime, markdown, rows, v2Stats } from './mock-statistics-data.mjs';
 
-const f8 = resolve('runs/f8-e2e/full-20261124T015004Z');
-const sourceConfig = JSON.parse(await readFile('config/harness.json'));
+const sourceConfig = JSON.parse(await readFile(new URL('./fixtures/harness.json', import.meta.url)));
 const ids = sourceConfig.scenarios.map(s => s.id);
 const diagnose = (classification, scenarioId = 'apm-transaction-stats') => ({
   queries: [],
@@ -25,6 +26,60 @@ const diagnose = (classification, scenarioId = 'apm-transaction-stats') => ({
 });
 const sha = value => createHash('sha256').update(value).digest('hex');
 const git = (cwd, ...args) => promisify(execFile)('git', args, { cwd });
+
+// Model the saved comparison report and its raw responses without using service data.
+async function savedF8Evidence(options) {
+  const directory = join(options.worktree, '..', 'f8-evidence');
+  const runDir = join(directory, 'runs', 'fixture-run');
+  await mkdir(runDir, { recursive: true });
+  const timeWindow = { stime: start, etime: end };
+  const raw = async (file, value) => {
+    const body = JSON.stringify(value);
+    await writeFile(join(runDir, file), body);
+    return { file, sha256: sha(body) };
+  };
+  const scenarios = await Promise.all(sourceConfig.scenarios.map(async scenario => {
+    const { id, domain, projectCode, mcpPath, referenceTool, statisticsMode, compareFields } = scenario;
+    const inconsistent = statisticsMode === 'transaction';
+    const args = { projectCode, path: mcpPath, timeRange: '1h', limit: 1000 };
+    const text = value => ({ content: [{ type: 'text', text: value }] });
+    const http = body => text(JSON.stringify({ ok: true, status: 200, body }));
+    const period = `${ftime(start)} → ${ftime(end)}`;
+    const headings = ['time', '_id_', ...compareFields];
+    const values = compareFields.map(() => 1);
+    const visible = statisticsMode ? rows(statisticsMode).slice(0, 4) : [];
+    const candidateText = statisticsMode ? markdown(statisticsMode, visible) : [
+      `## ${mcpPath}`, '', `**Period**: ${period}`, '',
+      `| ${headings.join(' | ')} |`,
+      `| ${headings.map(() => '---').join(' | ')} |`,
+      `| ${[ftime(start), 'fixture', ...values].join(' | ')} |`,
+    ].join('\n');
+    const candidate = await raw(`${id}-mcp.json`, text(candidateText));
+    let reference;
+    if (statisticsMode) {
+      const fullRows = rows(statisticsMode);
+      const data = v2Stats(statisticsMode, fullRows);
+      if (inconsistent) data[0].count += 1;
+      reference = await raw(`${id}-reference.json`, http({ data, total: data.length, retrievedTotal: data.length }));
+      const mxql = await raw(`${id}-reference-mxql.json`, http([{ _head_: {} }, ...fullRows]));
+      reference.statistics = { mxql, v2Window: alignedStatsWindow(start, end) };
+    } else {
+      const row = { time: start, _id_: 'fixture', ...Object.fromEntries(compareFields.map(field => [field, 1])) };
+      reference = await raw(`${id}-reference.json`, http([{ _head_: {} }, row]));
+    }
+    return {
+      id, domain, projectCode, mcpPath, referenceTool, mcpTool: 'whatap_query_data', timeWindow,
+      status: inconsistent ? 'UNVERIFIABLE' : 'PASS',
+      reason: inconsistent ? 'REFERENCE_INCONSISTENCY' : 'PASS',
+      checks: statisticsMode ? [{ code: 'STATS_AGGREGATE', ok: !inconsistent,
+        detail: inconsistent ? 'Synthetic aggregate differs from the matching MXQL rows' : 'Synthetic aggregates match' }] : [],
+      candidate: { ...candidate, args }, reference,
+    };
+  }));
+  const reportPath = join(runDir, 'report.json');
+  await writeFile(reportPath, JSON.stringify({ runDir, scenarios, totals: { PASS: 4, UNVERIFIABLE: 1 } }));
+  return { directory, reportPath };
+}
 
 async function fixture(t) {
   const temp = await mkdtemp(join(tmpdir(), 'harness-assignment-'));
@@ -40,18 +95,26 @@ async function fixture(t) {
   await git(repo, 'add', '.');
   await git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-m', 'base');
   await git(repo, 'worktree', 'add', '-b', 'agent', worktree);
-  await writeFile(configPath, JSON.stringify({ ...sourceConfig, outputDir: 'runs', rpcTimeoutMs: 1000 }));
+  await git(repo, 'remote', 'add', 'origin', 'https://github.com/jtlim/whatap-open-mcp.git');
+  const servers = {
+    candidate: resolve('test', sourceConfig.servers.candidate),
+    reference: resolve('test', sourceConfig.servers.reference),
+  };
+  await writeFile(configPath, JSON.stringify({ ...sourceConfig, servers, rpcTimeoutMs: 1000 }));
   return { configPath, worktree, allowGitSubmit: false };
 }
 
 test('F8 reference inconsistency and all PASS scenarios reach analysis from hashed evidence', async t => {
-  const options = { ...await fixture(t), evidencePath: f8 };
+  const options = await fixture(t);
+  options.evidencePath = (await savedF8Evidence(options)).directory;
   const report = await runAssignment(options, {
     analyze: async (_, prompt) => {
       assert.match(prompt, /REFERENCE_INCONSISTENCY/);
       assert.match(prompt, /apm-transaction-stats-reference-mxql\.json/);
       const saved = await loadEvidence(prompt.match(/전체 (?:비교 보고서|report\.json) (.*)/)[1]);
       assert.deepEqual(saved.scenarios.map(r => r.status), ['PASS', 'UNVERIFIABLE', 'PASS', 'PASS', 'PASS']);
+      assert.equal(Object.keys(saved.files).length, 12);
+      assert.equal(saved.sha256, sha(await readFile(saved.path)));
       return diagnose('API_OR_BACKEND_ISSUE');
     },
     snapshot: snapshotWorktree,
@@ -60,6 +123,10 @@ test('F8 reference inconsistency and all PASS scenarios reach analysis from hash
   assert.equal(report.diagnoses[1].classification, 'API_OR_BACKEND_ISSUE');
   assert.equal(report.changes.length, 0);
   assert.match(await readFile(join(report.directory, 'assignment.md'), 'utf8'), /REFERENCE_INCONSISTENCY/);
+
+  const mxql = Object.keys(report.before.files).find(file => file.endsWith('apm-transaction-stats-reference-mxql.json'));
+  await writeFile(mxql, '{}');
+  await assert.rejects(loadEvidence(report.before.path), /SHA-256 불일치/);
 });
 
 test('additional HTTP requests are bounded and reject arbitrary tools and query arguments', () => {
@@ -72,7 +139,8 @@ test('additional HTTP requests are bounded and reject arbitrary tools and query 
 });
 
 test('F8 analysis failure produces local JSON and Markdown without Git submission', async t => {
-  const options = { ...await fixture(t), evidencePath: f8, allowGitSubmit: true };
+  const options = { ...await fixture(t), allowGitSubmit: true };
+  options.evidencePath = (await savedF8Evidence(options)).directory;
   const report = await runAssignment(options, {
     snapshot: snapshotWorktree,
     analyze: async () => { throw Error('mock Codex authentication failed'); },
@@ -82,6 +150,9 @@ test('F8 analysis failure produces local JSON and Markdown without Git submissio
   assert.match(report.reason, /mock Codex authentication failed/);
   assert.equal(report.before.scenarios.length, 5);
   assert.equal(report.git.status, '미실행');
+  const json = JSON.parse(await readFile(join(report.directory, 'assignment.json'), 'utf8'));
+  assert.equal(json.status, 'AI_EXECUTION_FAILED');
+  assert.match(await readFile(join(report.directory, 'assignment.md'), 'utf8'), /AI_EXECUTION_FAILED/);
 });
 
 test('assignment schemas are accepted by the existing read-only and edit subprocess wrappers', async t => {
@@ -254,7 +325,8 @@ test('MCP classification can lead from reference inconsistency to editing, witho
 });
 
 test('an allowed HTTP lookup returns raw evidence to the second analysis round', async t => {
-  const options = { ...await fixture(t), evidencePath: f8 };
+  const options = await fixture(t);
+  options.evidencePath = (await savedF8Evidence(options)).directory;
   let calls = 0;
   const query = { scenarioId: ids[1], source: 'mxql', stime: Date.now() - 3600000, etime: Date.now() - 100 };
   const report = await runAssignment(options, {
@@ -308,4 +380,159 @@ test('an empty goal file is rejected before starting the assignment', async t =>
   options.goalPath = join(options.worktree, '..', 'empty.md');
   await writeFile(options.goalPath, '  \n');
   await assert.rejects(runAssignment(options), /사용자 목표 Markdown 파일이 비어 있습니다/);
+});
+
+test('Harness responsibility uses its own worktree and leaves pending MCP changes intact', async t => {
+  const options = { ...await fixture(t), allowGitSubmit: true };
+  const root = resolve(options.worktree, '..');
+  const harnessRepo = join(root, 'harness-original');
+  const harnessWorktree = join(root, 'harness-agent');
+  await mkdir(join(harnessRepo, 'src'), { recursive: true });
+  await writeFile(join(harnessRepo, 'src/agent.ts'), 'export const value = 1;\n');
+  await git(harnessRepo, 'init', '-b', 'submission');
+  await git(harnessRepo, 'add', '.');
+  await git(harnessRepo, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-m', 'base');
+  await git(harnessRepo, 'worktree', 'add', '-b', 'agent', harnessWorktree);
+  const mcpFile = join(options.worktree, 'src/query.ts');
+  await writeFile(mcpFile, 'export const queryData = 2;\n');
+  const directory = join(root, 'prior');
+  await mkdir(directory);
+  const { reportPath } = await savedF8Evidence(options);
+  const assumed = await loadEvidence(reportPath);
+  const rows = assumed.scenarios.map(row => ({ ...row, candidate: { args: row.candidate.args },
+    reference: {}, reason: 'MCP_PERIOD_MISSING_OR_INVALID', status: 'UNVERIFIABLE' }));
+  const baseline = JSON.stringify({ scenarios: rows });
+  await writeFile(join(directory, 'baseline.json'), baseline);
+  await writeFile(join(directory, 'assignment.json'), JSON.stringify({ before: { sha256: sha(baseline) } }));
+  const evidencePath = join(directory, 'assignment.md');
+  await writeFile(evidencePath, '# 이전 과제');
+  const fakeEntry = join(root, 'stage/dist/agent.js');
+  await mkdir(resolve(fakeEntry, '..'), { recursive: true });
+  await writeFile(fakeEntry, 'fixture');
+  let submitted = false;
+  const report = await runAssignment({ ...options, harnessWorktree, evidencePath }, {
+    analyze: async () => {
+      const answer = diagnose('MCP_DEFECT');
+      answer.diagnoses.push({ ...answer.diagnoses[1], classification: 'HARNESS_DEFECT', files: ['src/agent.ts'] });
+      return answer;
+    },
+    checkRepository: async (tree, target) => {
+      assert.equal(tree, harnessWorktree);
+      assert.equal(target, 'harness');
+    },
+    reproduceHarness: async (_config, row, path) => ({
+      before: { path, row },
+      verify: async (dist, candidate) => {
+        assert.equal(dist, join(root, 'stage/dist'));
+        assert.equal(candidate, 'mcp-build');
+        return [];
+      },
+    }),
+    edit: async (tree, prompt) => {
+      assert.equal(tree, harnessWorktree);
+      assert.match(prompt, /baseline\.json/);
+      await writeFile(join(tree, 'src/agent.ts'), 'export const value = 2;\n');
+      return { summary: '변경', rationale: '재현', risks: [], testsRun: [] };
+    },
+    prepare: async (tree, _dir, _edit, _attempt, regression, _copy, inputs) => {
+      if (tree === harnessWorktree) {
+        assert.equal(regression, true);
+        assert.equal(inputs.entry, 'agent.js');
+      } else assert.equal(tree, options.worktree);
+      return { candidate: tree === harnessWorktree ? fakeEntry : 'mcp-build', build: { ok: true }, regression: { ok: true } };
+    },
+    submit: async (tree, _head, changes, receipt, check, target) => {
+      assert.equal(tree, harnessWorktree);
+      assert.equal(target, 'harness');
+      assert.equal(changes[0].before, 'export const value = 1;\n');
+      await check();
+      receipt.pr = 'https://github.com/jtlim/whatap-pr-agent/pull/1';
+      submitted = true;
+    },
+  });
+  assert.equal(report.status, 'VERIFIED', report.reason);
+  assert.equal(report.repository, 'jtlim/whatap-pr-agent');
+  assert.ok(report.related.deferred);
+  assert.equal(submitted, true);
+  assert.equal(await readFile(mcpFile, 'utf8'), 'export const queryData = 2;\n');
+  assert.equal(await readFile(evidencePath, 'utf8'), '# 이전 과제');
+});
+
+test('MCP resume waits for the preceding Harness PR and preserves the pending work on rejection', async t => {
+  const options = await fixture(t);
+  const goalPath = join(options.worktree, '..', 'goal.md');
+  const source = join(options.worktree, 'src/query.ts');
+  const pending = 'export const queryData = 2;\n';
+  await writeFile(goalPath, '# 기존 절대시간 조회 개선');
+  await writeFile(source, pending);
+  const resumeMcpAfter = 'https://github.com/jtlim/whatap-pr-agent/pull/5';
+  const report = await runAssignment({ ...options, goalPath, resumeMcpAfter, evidencePath: (await savedF8Evidence(options)).directory, allowGitSubmit: true }, {
+    approval: async pr => {
+      assert.equal(pr, resumeMcpAfter);
+      throw Error('선행 PR 병합 미확인');
+    },
+    analyze: async () => assert.fail('MCP resume analyzed before approval'),
+    edit: async () => assert.fail('MCP resume invoked the editor'),
+    prepare: async () => assert.fail('MCP resume built before approval'),
+    submit: async () => assert.fail('MCP resume submitted before approval'),
+  });
+  assert.equal(report.status, 'UNVERIFIABLE');
+  assert.match(report.reason, /선행 PR 병합 미확인/);
+  assert.equal(await readFile(source, 'utf8'), pending);
+});
+
+test('approved MCP resume checks committed schema separately from the pending candidate', async t => {
+  const options = await fixture(t);
+  const goalPath = join(options.worktree, '..', 'goal.md');
+  const source = join(options.worktree, 'src/query.ts');
+  const pending = 'export const queryData = 2;\n';
+  await writeFile(goalPath, '# 기존 절대시간 조회 개선');
+  await writeFile(source, pending);
+  const resumeMcpAfter = 'https://github.com/jtlim/whatap-pr-agent/pull/5';
+  let reads = 0;
+  const report = await runAssignment({ ...options, goalPath, resumeMcpAfter, evidencePath: (await savedF8Evidence(options)).directory }, {
+    approval: async pr => ({ pr, commit: 'a'.repeat(40) }),
+    analyze: async () => assert.fail('MCP resume invoked analysis'),
+    edit: async () => assert.fail('MCP resume invoked the editor'),
+    prepare: async (tree, dir, _edit, _attempt, regression) => {
+      const committed = tree !== options.worktree;
+      assert.equal(await readFile(join(tree, 'src/query.ts'), 'utf8'), committed ? 'export const queryData = 1;\n' : pending);
+      const candidate = join(dir, committed ? 'committed.js' : 'pending.js');
+      await writeFile(candidate, 'fixture');
+      return { candidate, build: { ok: true }, regression: { ok: regression } };
+    },
+    verify: async (config, request) => {
+      const runDir = join(config.outputDir, `resume-evidence-${++reads}`);
+      await mkdir(runDir);
+      const file = 'raw.json';
+      const body = JSON.stringify({ value: 3 });
+      await writeFile(join(runDir, file), body);
+      const definition = config.scenarios.find(s => s.id === request.scenarioId);
+      const fixed = request.fixedReplay;
+      const legacy = fixed && config.servers.candidate.endsWith('committed.js');
+      const timeWindow = fixed?.window ?? { stime: 1795481448234, etime: 1795485048234 };
+      const original = (fixed ?? request.relativeReplay).originalArgs;
+      const args = { ...original };
+      if (fixed) {
+        delete args.timeRange;
+        Object.assign(args, fixed.window);
+      }
+      const evidence = { file, sha256: sha(body) };
+      const row = { id: definition.id, projectCode: definition.projectCode, mcpPath: args.path,
+        mcpTool: 'whatap_query_data', timeWindow, status: legacy ? 'UNVERIFIABLE' : 'PASS',
+        reason: legacy ? 'FIXED_REPLAY_SCHEMA_NOT_SUPPORTED' : 'PASS',
+        candidate: { ...evidence, args }, reference: evidence, checks: [] };
+      const disk = { runDir, scenarios: [row], ...(fixed ? {
+        fixedReplayAudit: { toolCalls: legacy ? 0 : 1, schemaVerdict: legacy ? 'NO_EXPLICIT_WINDOW' : 'SCHEMA_CANDIDATE',
+          periodMatched: !legacy, requestedWindow: timeWindow },
+      } : { relativeReplayAudit: { toolCalls: 1, schemaVerified: true, periodObserved: true } }) };
+      await writeFile(join(runDir, 'report.json'), JSON.stringify(disk));
+      return disk;
+    },
+    submit: async () => assert.fail('MCP resume submitted without authorization'),
+  });
+  assert.equal(report.status, 'VERIFIED', report.reason);
+  assert.equal(report.absoluteChecks.length, 5);
+  assert.equal(report.related.approval.pr, resumeMcpAfter);
+  assert.equal(await readFile(source, 'utf8'), pending);
 });

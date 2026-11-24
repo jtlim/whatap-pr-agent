@@ -1,0 +1,137 @@
+{
+  "servers": {
+    "candidate": "mock-candidate-good.mjs",
+    "reference": "mock-reference.mjs"
+  },
+  "outputDir": "runs",
+  "rpcTimeoutMs": 15000,
+  "retryCount": 0,
+  "replayPolicy": "PERIOD_PAIRED",
+  "scenarios": [
+    {
+      "id": "server-metrics",
+      "domain": "server",
+      "description": "Server CPU and memory metrics",
+      "projectCode": 33194,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_server_metrics",
+      "mcpPath": "v2/sys/server_base",
+      "matchKeys": [
+        "time",
+        "_id_"
+      ],
+      "compareFields": [
+        "cpu",
+        "memory_pused"
+      ],
+      "absoluteTolerance": 0.000001,
+      "allowedMcpPaths": [
+        "v2/sys/server_base"
+      ],
+      "expectedDuration": "1h",
+      "userRequest": "테스트 프로젝트 33194 최근 1시간 CPU 메모리 조회"
+    },
+    {
+      "id": "apm-transaction-stats",
+      "domain": "apm",
+      "description": "APM transaction statistics",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_transactions",
+      "mcpPath": "mxql/app/stat_tx_pcode",
+      "statisticsMode": "transaction",
+      "matchKeys": [
+        "time",
+        "tx_hash",
+        "oid",
+        "okind",
+        "pcode"
+      ],
+      "compareFields": [
+        "tx_count",
+        "tx_error",
+        "tx_time_sum"
+      ],
+      "allowedMcpPaths": [
+        "mxql/app/stat_tx_pcode"
+      ],
+      "expectedDuration": "1h",
+      "userRequest": "테스트 프로젝트 5490 최근 1시간 트랜잭션 통계 조회"
+    },
+    {
+      "id": "apm-exception-stats",
+      "domain": "apm",
+      "description": "APM Exception statistics",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_errors",
+      "mcpPath": "mxql/app/stat_error_pcode",
+      "statisticsMode": "exception",
+      "matchKeys": [
+        "time",
+        "classHash",
+        "serviceHash",
+        "oid"
+      ],
+      "compareFields": [
+        "count"
+      ],
+      "allowedMcpPaths": [
+        "mxql/app/stat_error_pcode"
+      ],
+      "expectedDuration": "1h",
+      "userRequest": "테스트 프로젝트 5490 최근 1시간 예외 통계 조회"
+    },
+    {
+      "id": "apm-tps-series",
+      "domain": "timeseries",
+      "description": "APM TPS 5-second time series",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_tps_series",
+      "mcpPath": "v2/app/tps_pcode",
+      "matchKeys": [
+        "time",
+        "_id_"
+      ],
+      "compareFields": [
+        "tps"
+      ],
+      "absoluteTolerance": 0.000001,
+      "expectedStepMs": 5000,
+      "allowedMcpPaths": [
+        "v2/app/tps_pcode"
+      ],
+      "expectedDuration": "1h",
+      "userRequest": "테스트 프로젝트 5490 최근 1시간 TPS 조회"
+    },
+    {
+      "id": "apm-error-series",
+      "domain": "timeseries",
+      "description": "APM transaction error 5-second time series",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_error_series",
+      "mcpPath": "v2/app/tx_error_pcode",
+      "matchKeys": [
+        "time",
+        "_id_"
+      ],
+      "compareFields": [
+        "tx_error"
+      ],
+      "absoluteTolerance": 0,
+      "expectedStepMs": 5000,
+      "allowedMcpPaths": [
+        "v2/app/tx_error_pcode"
+      ],
+      "expectedDuration": "1h",
+      "userRequest": "테스트 프로젝트 5490 최근 1시간 오류 시계열 조회"
+    }
+  ]
+}

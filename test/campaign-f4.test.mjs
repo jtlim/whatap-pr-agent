@@ -20,7 +20,7 @@ const envTokens=async fn=>{
   if(b===undefined)delete process.env.WHATAP_HTTP_API_TOKEN;else process.env.WHATAP_HTTP_API_TOKEN=b;
  }};
 async function config(root){
- const {config}=await loadConfig(resolve('config/harness.json'));
+ const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
  config.outputDir=root;config.servers.reference=resolve('test/mock-reference-statistics.mjs');
  config.servers.candidate=resolve('test/mock-codex-statistics.mjs');
  return config;

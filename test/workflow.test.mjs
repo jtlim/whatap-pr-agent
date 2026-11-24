@@ -19,7 +19,7 @@ async function create(out,scenario='apm-tps-series') {
 async function trans(out,prev,changes,type='TEST_TRANSITION'){
   return withWorkflowLock(out,()=>writeTransition(out,prev,changes,type,'테스트 단계 전환'));
 }
-async function config(out){const {config}=await loadConfig(resolve('config/harness.json'));
+async function config(out){const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
   config.outputDir=out;
   config.servers.reference=resolve('test/mock-reference-statistics.mjs');
   config.servers.candidate=resolve('test/mock-codex-statistics.mjs');
@@ -164,7 +164,7 @@ test('Phase A: path traversal is rejected for task identifier',()=>sandbox(async
 
 test('Phase A CLI: create/status/close without Codex or WhaTap network calls',()=>sandbox(async out=>{
  const configPath=join(out,'harness.json');
- const {config}=await loadConfig(resolve('config/harness.json'));
+ const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
  config.outputDir=join(out,'run-output');
  await writeFile(configPath,JSON.stringify(config));
  const cmd=(...args)=>spawnSync(process.execPath,['dist/cli.js','task',...args,'--config',configPath],{cwd:resolve('.'),encoding:'utf8',timeout:10000});

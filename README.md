@@ -89,7 +89,7 @@ node tools/run-assignment.mjs --config config/harness.json \
 
 원격 제출을 실행할 때만 첫 명령에 `--allow-git-submit`을 추가합니다. 검증된 변경을 커밋하고 `jtlim/whatap-open-mcp`의 `agent`에 push한 뒤 `submission` 대상 PR을 생성하거나 기존 PR을 확인합니다. 원격 브랜치 접근과 PR 권한을 가진 Git 및 `gh` 인증이 필요합니다. 공개 PR 본문에는 실행 방법의 요약만 사용하며 실제 수치와 상세 로그는 로컬에 보관합니다.
 
-결과 경로는 실행 종료 시 출력됩니다. 기본 설정에서는 `runs/assignment-*/assignment.md`에서 한국어 보고서를 읽고, `assignment.json`에서 전체 코드 변경, 판단, 증거 경로 및 SHA-256, 빌드·회귀 결과와 Git 상태를 확인합니다. MCP 및 HTTP 원본은 보고서에 연결된 별도 JSON 파일에 저장합니다. Codex 분석은 회차당 180초, 편집은 600초, 빌드와 테스트는 각각 180초와 300초, MCP RPC는 설정값 기준 최대 180초로 제한합니다.
+결과 경로는 실행 종료 시 출력됩니다. 기본 설정에서는 `runs/assignment-*/assignment.md`에서 한국어 보고서를 읽고, `assignment.json`에서 전체 코드 변경, 판단, 증거 경로 및 SHA-256, 빌드·회귀 결과와 Git 상태를 확인합니다. MCP 및 HTTP 원본은 보고서에 연결된 별도 JSON 파일에 저장합니다. Codex 분석은 회차당 600초, 편집은 900초, 빌드와 테스트는 각각 180초와 300초, MCP RPC는 설정값 기준 최대 180초로 제한합니다.
 
 종료 코드 `0`은 `VERIFIED` 또는 `NO_CHANGE`, `1`은 실행 결과 확인 필요, `2`는 명령 또는 초기화 오류입니다. 보고서는 `AI_EXECUTION_FAILED`, `VERIFICATION_FAILED`, `UNVERIFIABLE`, `SUBMISSION_FAILED`를 구분합니다. Harness 회귀 테스트는 `npm test`로 실행합니다.
 

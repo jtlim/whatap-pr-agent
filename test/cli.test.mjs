@@ -7,7 +7,7 @@ test('run preflight lists the failing checks, not a misleading doctor instructio
   const env = { ...process.env };
   delete env.WHATAP_API_TOKEN;
   delete env.WHATAP_HTTP_API_TOKEN;
-  const run = spawnSync(process.execPath, ['dist/cli.js', 'run', '--scenario', 'apm-tps-series'], {
+  const run = spawnSync(process.execPath, ['dist/cli.js', 'run', '--config', 'test/fixtures/harness.json', '--scenario', 'apm-tps-series'], {
     cwd: resolve('.'), env, encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.status, 2);

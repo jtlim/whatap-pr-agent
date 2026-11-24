@@ -8,7 +8,7 @@ import { compareSubset, checkSummary, runAgentHarness, parseCodexEvents, buildCo
 const mock=resolve('test/mock-codex.mjs');
 async function runOne(id,request) {
  const tmp=await mkdtemp(join(tmpdir(),'agent-harness-'));
- const {config}=await loadConfig(resolve('config/harness.json'));
+ const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
  config.servers.reference=resolve('test/mock-reference.mjs');
  config.outputDir=tmp;
  try {return await runAgentHarness(config,{scenarioId:id,requestOverride:request,command:process.execPath,
@@ -60,7 +60,7 @@ test('MCP Summary values are checked against raw reference, not rounded display 
 
 
 test('Codex MCP proxy receives required tap and API token environment variable NAMES', async()=>{
-  const {config}=await loadConfig(resolve('config/harness.json'));
+  const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
   const args=buildCodexArgs(config);
   const overrides=args.filter((v,i)=>i>0 && args[i-1]==='-c');
   assert.ok(overrides.some(v=>v.includes('mcp_servers.whatap.env_vars=') &&
@@ -85,7 +85,7 @@ test('Codex events distinguish WhaTap MCP startup failure from LLM not calling a
 test('failed WhaTap MCP handshake becomes MCP_STARTUP_FAILED in report even if TAP file is empty',async()=>{
   const tmp=await mkdtemp(join(tmpdir(),'agent-startup-'));
   try {
-    const {config}=await loadConfig(resolve('config/harness.json'));
+    const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
     config.servers.reference=resolve('test/mock-reference.mjs');
     config.outputDir=tmp;
     const report=await runAgentHarness(config,{
@@ -106,7 +106,7 @@ test('failed WhaTap MCP handshake becomes MCP_STARTUP_FAILED in report even if T
 test('LLM no tool call is still LLM_NO_MATCHING_MCP_QUERY, not an MCP startup failure',async()=>{
   const tmp=await mkdtemp(join(tmpdir(),'agent-no-tool-'));
   try {
-    const {config}=await loadConfig(resolve('config/harness.json'));
+    const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
     config.servers.reference=resolve('test/mock-reference.mjs');
     config.outputDir=tmp;
     const report=await runAgentHarness(config,{

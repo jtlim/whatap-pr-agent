@@ -83,7 +83,7 @@ export async function codexReadOnly(worktree:string,prompt:string,dir:string,out
     '--output-schema',schemaFile,'--output-last-message',outputFile,prompt];
   const child=spawn('codex',args,{cwd:worktree,env,stdio:['ignore','pipe','pipe'],shell:false});
   let stdout='',stderr='',overLimit=false,expired=false;
-  const timeout=setTimeout(()=>{expired=true;child.kill('SIGTERM');setTimeout(()=>child.kill('SIGKILL'),3000).unref();},180000);
+  const timeout=setTimeout(()=>{expired=true;child.kill('SIGTERM');setTimeout(()=>child.kill('SIGKILL'),3000).unref();},600_000);
   child.stdout.on('data',(b:Buffer)=>{if(stdout.length<1024*1024)stdout+=b.toString('utf8');else overLimit=true;});
   child.stderr.on('data',(b:Buffer)=>{if(stderr.length<32768)stderr+=b.toString('utf8');});
   let exit:number;

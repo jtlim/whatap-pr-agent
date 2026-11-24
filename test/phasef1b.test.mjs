@@ -17,7 +17,7 @@ const ref=resolve('test/mock-f1b-reference.mjs');
 async function run(candidate=good, spec=replay){
   const dir=await mkdtemp(join(tmpdir(),'phase-f1b-'));
   try {
-    const {config}=await loadConfig(resolve('config/harness.json'));
+    const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
     config.outputDir=dir;config.servers={candidate,reference:ref};
     const r=await runAgentHarness(config,{scenarioId:'server-metrics',fixedReplay:spec,
       command:'/this-path-does-not-exist/codex'});

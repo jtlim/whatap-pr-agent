@@ -12,7 +12,7 @@ import {loadConfig} from '../dist/config.js';
 async function sandbox(fn){const out=await mkdtemp(join(tmpdir(),'whatap-phase-b-'));
   try{return await fn(out);}finally{await rm(out,{recursive:true,force:true});}}
 async function setup(out){
- const {config}=await loadConfig(resolve('config/harness.json'));
+ const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
  config.outputDir=out;
  config.servers.candidate=resolve('test/mock-codex-statistics.mjs');
  config.servers.reference=resolve('test/mock-reference-statistics.mjs');

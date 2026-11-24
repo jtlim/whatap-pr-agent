@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,readFile,rm} from 'node:fs/promises';
-import {spawnSync} from 'node:child_process';
+import { replaySavedRun } from './fixtures/replay.mjs';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {loadConfig} from '../dist/config.js';
@@ -10,7 +10,7 @@ import {runAgentHarness} from '../dist/agent.js';
 async function runMulti(mode='',preserve=false,referenceMode=''){
  const tmp=await mkdtemp(join(tmpdir(),'agent-multicall-'));
  try{
-  const {config}=await loadConfig(resolve('config/harness.json'));
+  const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
   config.servers.reference=resolve(`test/mock-reference-multi${referenceMode?'-'+referenceMode:''}.mjs`);
   config.outputDir=tmp;
   const cmd=`test/mock-codex-multi${mode?'-'+mode:''}.mjs`;
@@ -76,7 +76,7 @@ test('one unparsable Period makes aggregate UNVERIFIABLE, while first PASS remai
 test('offline replay independently checks BOTH stored MCP/HTTP evidence pairs',async()=>{
  const {report,tmp}=await runMulti('',true);
  try{
-  const cp=spawnSync(process.execPath,['tools/replay-run.mjs',report.runDir],{encoding:'utf8'});
+  const cp=replaySavedRun(report.runDir);
   assert.equal(cp.status,0,cp.stderr+'\n'+cp.stdout);
   assert.match(cp.stdout,/apm-tps-series 호출 1: 보고서=PASS \/ 재검증=PASS \/ 100\/720/);
   assert.match(cp.stdout,/apm-tps-series 호출 2: 보고서=PASS \/ 재검증=PASS \/ 720\/720/);
@@ -130,7 +130,7 @@ test('timestamp one bucket beyond endpoint is UNVERIFIABLE before HTTP call',asy
 test('offline replay checks aligned 720-row endpoint evidence without relaxing value equality',async()=>{
  const {report,tmp}=await runMulti('endpoint',true);
  try{
-  const cp=spawnSync(process.execPath,['tools/replay-run.mjs',report.runDir],{encoding:'utf8'});
+  const cp=replaySavedRun(report.runDir);
   assert.equal(cp.status,0,cp.stderr+'\n'+cp.stdout);
   assert.match(cp.stdout,/호출 2: 보고서=PASS \/ 재검증=PASS \/ 720\/720/);
  }finally{await rm(tmp,{recursive:true,force:true});}

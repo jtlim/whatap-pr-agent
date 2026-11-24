@@ -40,7 +40,7 @@ type Receipt = { status: string; commit?: string; pr?: string };
 
 export async function submitAssignment(worktree: string, head: string,
   changes: Array<{ path: string; after: string | null }>, receipt: Receipt,
-  assertVerifiedSource: () => Promise<void>, target: AssignmentTarget = 'mcp'): Promise<void> {
+  assertVerifiedSource: () => Promise<void>, target: AssignmentTarget = 'mcp', assertIntegrity?: () => Promise<void>): Promise<void> {
   if ((await checkAssignmentRepository(worktree, target)).head !== head) throw Error('제출할 worktree HEAD가 변경되었습니다.');
   const repository = repositories[target];
   const url = `https://github.com/${repository}.git`;
@@ -96,6 +96,7 @@ export async function submitAssignment(worktree: string, head: string,
     if (change.after !== null && await git('show', `${commit}:${change.path}`) !== change.after)
       throw Error('커밋된 파일 내용과 검증한 소스가 다릅니다.');
   }
+  await assertIntegrity?.();
   await git('push', url, `${commit}:refs/heads/agent`);
   receipt.status = '원격 agent 업데이트 완료';
   if (!open.length) {

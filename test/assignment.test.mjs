@@ -220,11 +220,12 @@ function mockAbsoluteTransport(t, mode) {
   });
 }
 
-async function simulateEdit(t, finalVerdict, initialVerdict = 'FAIL', allowGitSubmit = false, absoluteMode) {
+async function simulateEdit(t, finalVerdict, initialVerdict = 'FAIL', allowGitSubmit = false, absoluteMode, tamper) {
   const options = { ...await fixture(t), allowGitSubmit };
   let madeBuild = 0;
   let submitted = 0;
   let queries = 0;
+  let analyses = 0;
   const target = absoluteMode ? ids[0] : ids[1];
   const goal = '# 고정 기간 조회 목표';
   if (absoluteMode) {
@@ -232,9 +233,15 @@ async function simulateEdit(t, finalVerdict, initialVerdict = 'FAIL', allowGitSu
     await writeFile(options.goalPath, goal);
     mockAbsoluteTransport(t, absoluteMode);
   }
+  const rawConfig = JSON.parse(await readFile(options.configPath));
+  const reference = join(options.worktree, '..', 'http', 'dist', 'index.js');
+  await mkdir(resolve(reference, '..'), { recursive: true });
+  await writeFile(reference, 'export {};');
+  await writeFile(options.configPath, JSON.stringify({ ...rawConfig, servers: { ...rawConfig.servers, reference } }));
   const report = await runAssignment(options, {
     snapshot: snapshotWorktree,
     analyze: async (_, prompt) => {
+      analyses++;
       const initial = await loadEvidence(prompt.match(/전체 (?:비교 보고서|report\.json) (.*)/)[1]);
       assert.equal(initial.scenarios.find(s => s.id === target).status, initialVerdict);
       if (absoluteMode) {
@@ -247,6 +254,7 @@ async function simulateEdit(t, finalVerdict, initialVerdict = 'FAIL', allowGitSu
     edit: async (worktree, prompt) => {
       if (absoluteMode) assert.ok(prompt.includes(goal));
       await writeFile(join(worktree, 'src/query.ts'), 'export const queryData = 2;\n');
+      if (tamper === 'config') await writeFile(options.configPath, (await readFile(options.configPath, 'utf8')) + '\n');
       return { summary: '수정', rationale: '근거', testsRun: [], risks: [] };
     },
     prepare: async (_worktree, stageDir, _edit, _attempt, regression) => {
@@ -288,16 +296,34 @@ async function simulateEdit(t, finalVerdict, initialVerdict = 'FAIL', allowGitSu
           candidate: { ...file('mcp.json'), args }, reference: file('http.json') }],
         relativeReplayAudit: { toolCalls: 1, schemaVerified: true, periodObserved: true, observedWindow: timeWindow },
       };
-      await writeFile(join(runDir, 'report.json'), JSON.stringify(disk));
+      await writeFile(join(runDir, 'report.json'), JSON.stringify(
+        !original && tamper === 'harness' ? { ...disk, scenarios: [] } : disk));
       return disk;
     },
     lookup: async () => assert.fail('Unexpected HTTP lookup'),
-    submit: async (_worktree, _head, _changes, receipt, assertVerifiedSource) => {
+    submit: async (_worktree, _head, _changes, receipt, assertVerifiedSource, _target, assertIntegrity) => {
       await assertVerifiedSource();
+      if (tamper === 'http') await writeFile(reference, '\n// changed\n');
+      await assertIntegrity();
       submitted++;
       receipt.status = 'PR 확인 완료';
     },
   });
+  assert.equal(analyses, 1);
+  if (tamper) {
+    assert.equal(report.status, 'UNVERIFIABLE', report.reason);
+    assert.match(report.reason, tamper === 'harness' ? /Harness 검증 증거/ : /무결성/);
+    assert.equal(submitted, 0);
+    assert.equal(report.integrity.checks.at(-1).unchanged, tamper === 'harness');
+    assert.equal(report.after.length, tamper === 'http' ? 5 : 0);
+    if (tamper === 'harness') {
+      assert.match(report.reason, /observation-6\/report\.json/);
+      assert.ok(await readFile(join(report.directory, 'observation-6', 'report.json')));
+    }
+    assert.equal(madeBuild, tamper === 'config' ? 1 : 2);
+    assert.ok(report.changes.length);
+    return report;
+  }
   assert.equal(submitted, allowGitSubmit && finalVerdict === 'PASS' && initialVerdict === 'FAIL' ? 1 : 0);
   assert.equal(madeBuild, 2, report.reason);
   assert.equal(queries, 10);
@@ -321,6 +347,19 @@ test('AI edit with a failed independent comparison is reported as verification f
 
 test('verified changes reach the submission adapter only with explicit authorization', async t => {
   assert.equal((await simulateEdit(t, 'PASS', 'FAIL', true)).git.status, 'PR 확인 완료');
+});
+
+test('MCP edits that change the validation settings stop before rebuilding', async t => {
+  await simulateEdit(t, 'PASS', 'FAIL', true, undefined, 'config');
+});
+
+test('HTTP Client drift at the push boundary preserves the MCP evidence and stops submission', async t => {
+  const report = await simulateEdit(t, 'PASS', 'FAIL', true, undefined, 'http');
+  assert.equal(report.integrity.checks.at(-1).stage, '원격 Push 직전');
+});
+
+test('Missing Harness verification evidence after MCP editing fails closed without new analysis', async t => {
+  await simulateEdit(t, 'PASS', 'FAIL', true, undefined, 'harness');
 });
 
 test('MCP classification can lead from reference inconsistency to editing, without certifying an unproven fix', async t => {

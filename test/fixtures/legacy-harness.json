@@ -1,0 +1,94 @@
+{
+  "servers": {
+    "reference": "../whatap-http-agent/dist/index.js",
+    "candidate": "../whatap-open-mcp/dist/index.js"
+  },
+  "rpcTimeoutMs": 180000,
+  "retryCount": 0,
+  "outputDir": "runs",
+  "scenarios": [
+    {
+      "id": "server-metrics",
+      "domain": "server",
+      "description": "Server CPU and memory metrics",
+      "projectCode": 33194,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_server_metrics",
+      "mcpPath": "v2/sys/server_base",
+      "matchKeys": [
+        "time",
+        "_id_"
+      ],
+      "compareFields": [
+        "cpu",
+        "memory_pused"
+      ],
+      "absoluteTolerance": 1e-06,
+      "mcpTimeRange": "5m",
+      "mcpLimit": 10000
+    },
+    {
+      "id": "apm-transaction-stats",
+      "domain": "apm",
+      "description": "APM transaction statistics",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_transactions",
+      "mcpPath": null
+    },
+    {
+      "id": "apm-exception-stats",
+      "domain": "apm",
+      "description": "APM Exception statistics",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_errors",
+      "mcpPath": null
+    },
+    {
+      "id": "apm-tps-series",
+      "domain": "timeseries",
+      "description": "APM TPS 5-second time series",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_tps_series",
+      "mcpPath": "v2/app/tps_pcode",
+      "matchKeys": [
+        "time",
+        "_id_"
+      ],
+      "compareFields": [
+        "tps"
+      ],
+      "absoluteTolerance": 1e-06,
+      "expectedStepMs": 5000,
+      "mcpTimeRange": "5m",
+      "mcpLimit": 10000
+    },
+    {
+      "id": "apm-error-series",
+      "domain": "timeseries",
+      "description": "APM transaction error 5-second time series",
+      "projectCode": 5490,
+      "stime": 1795336800000,
+      "etime": 1795338600000,
+      "referenceTool": "whatap_http_apm_error_series",
+      "mcpPath": "v2/app/tx_error_pcode",
+      "matchKeys": [
+        "time",
+        "_id_"
+      ],
+      "compareFields": [
+        "tx_error"
+      ],
+      "absoluteTolerance": 0,
+      "expectedStepMs": 5000,
+      "mcpTimeRange": "5m",
+      "mcpLimit": 10000
+    }
+  ]
+}

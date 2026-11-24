@@ -1,0 +1,68 @@
+node_modules/
+dist/
+runs/
+.env
+*.log
+
+# Runtime and build artifacts
+/node_modules/
+/dist/
+/runs/
+/.f7-*/
+
+# Local configuration and credentials
+/config/*
+!/config/*.example.json
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and backups
+*.log
+*.bak
+*.backup
+*.tar.gz
+*.zip
+
+# Runtime and build artifacts
+/node_modules/
+/dist/
+/runs/
+/.f7-*/
+
+# Local configuration and credentials
+/config/*
+!/config/*.example.json
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and backups
+*.log
+*.bak
+*.backup
+*.tar.gz
+*.zip
+
+# Runtime and build artifacts
+/node_modules/
+/dist/
+/runs/
+/.f7-*/
+
+# Local configuration and credentials
+/config/*
+!/config/*.example.json
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and backups
+*.log
+*.bak
+*.backup
+*.tar.gz
+*.zip

@@ -15,6 +15,7 @@ import type { HarnessConfig, RunReport, ScenarioReport } from './types.js';
 import { withWorkflowLock } from './workflow.js';
 import { checkAssignmentRepository, checkHarnessApproval, repositories, submitAssignment, type AssignmentTarget } from './assignment-git.js';
 import { reproduceHarnessFailure } from './assignment-harness.js';
+import { reproduceAbsoluteValidation } from './assignment-contract.js';
 
 const command = promisify(execFile);
 const scenarioIds = ['server-metrics', 'apm-transaction-stats', 'apm-exception-stats', 'apm-tps-series', 'apm-error-series'];
@@ -221,13 +222,16 @@ function matchesReplay(plan: ReturnType<typeof verificationPlan>, evidence: Evid
 type Outcome = 'NO_CHANGE' | 'VERIFIED' | 'AI_EXECUTION_FAILED' | 'VERIFICATION_FAILED' | 'UNVERIFIABLE' | 'SUBMISSION_FAILED';
 type Change = { path: string; before: string | null; after: string | null };
 type Step = { stage: string; attempt: number; startedAt: string; finishedAt?: string; error?: string };
+type HarnessCheck = Awaited<ReturnType<typeof reproduceHarnessFailure>> | Awaited<ReturnType<typeof reproduceAbsoluteValidation>>;
+type Integrity = { runtime: string; config: string; httpClient: string };
 type AssignmentReport = {
+  integrity?: { baseline: Integrity; checks: Array<{ stage: string; observed?: Integrity; unchanged: boolean; error?: string }> };
   goal?: string;
   target?: AssignmentTarget;
   repository?: string;
   related?: { input?: string; inputSha256?: string; companion?: { path: string; sha256: string }; deferred?: string; approval?: { pr: string; commit: string } };
-  harnessChecks?: Array<{ id: string; before: { path: string; row: ScenarioReport };
-    after?: Awaited<ReturnType<Awaited<ReturnType<typeof reproduceHarnessFailure>>['verify']>> }>;
+  harnessChecks?: Array<{ id: string; before: { path: string; row: ScenarioReport; sha256?: string };
+    after?: Awaited<ReturnType<HarnessCheck['verify']>> }>;
   absoluteChecks: Array<{ id: string; before: Evidence; after?: Evidence }>;
   directory: string; status: Outcome; purpose: string; startedAt: string; finishedAt?: string;
   sourceHead?: string; historical: boolean; scenarios: HarnessConfig['scenarios'];
@@ -338,8 +342,10 @@ async function assertPublishable(report: AssignmentReport): Promise<void> {
 }
 
 async function runPipeline(report: AssignmentReport, config: HarnessConfig, options: AssignmentOptions,
-  root: string, services: typeof defaultServices): Promise<void> {
+  root: string, services: typeof defaultServices, configHash: string): Promise<void> {
   let failure: Outcome = 'UNVERIFIABLE';
+  let mcpEditingStarted = false;
+  let checkIntegrity: ((stage: string) => Promise<void>) | undefined;
   const step = async <T>(stage: string, attempt: number, action: () => Promise<T>): Promise<T> => {
     const history: Step = { stage, attempt, startedAt: new Date().toISOString() };
     report.attempts.push(history);
@@ -354,8 +360,16 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
     if (inside(worktree, root) || inside(root, worktree) || root === worktree || inside(worktree, report.directory))
       throw Error('MCP worktree와 Harness 및 실행 증거 경로를 분리해야 합니다.');
     const verify = async (cfg: HarnessConfig, opts: Parameters<typeof runAgentHarness>[1]) => {
-      const out = await services.verify(cfg, opts, message => console.log(message));
-      return loadEvidence(join(out.runDir, 'report.json'));
+      let path: string | undefined;
+      try {
+        const out = await services.verify(cfg, opts, message => console.log(message));
+        path = join(out.runDir, 'report.json');
+        return await loadEvidence(path);
+      } catch (error) {
+        if (!mcpEditingStarted) throw error;
+        failure = 'UNVERIFIABLE';
+        throw Error(`MCP 수정 구간에서 Harness 검증 증거를 확인할 수 없습니다 · ${path ?? opts?.scenarioId ?? report.directory} · ${errorMessage(error)}`);
+      }
     };
     if (options.evidencePath) {
       report.before = await step('저장된 수정 전 증거 확인', 1, async () => loadEvidence(await evidencePath(options.evidencePath!)));
@@ -500,6 +514,9 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
     const defects = report.diagnoses.filter(d => d.classification === 'MCP_DEFECT');
     const harnessDefects = report.diagnoses.filter(d => d.classification === 'HARNESS_DEFECT');
     if (harnessDefects.length) {
+      failure = 'UNVERIFIABLE';
+      if (options.resumeMcpAfter || mcpEditingStarted)
+        throw Error('MCP 수정 구간에서 Harness 결함을 발견했습니다. 현재 증거를 보존하고 종료합니다.');
       report.target = 'harness';
       report.repository = repositories.harness;
       if (defects.length || before.status) report.related = { ...report.related,
@@ -510,17 +527,22 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
       await services.checkRepository(harnessTree, 'harness');
       report.sourceHead = harnessBefore.head;
       const candidateFiles = [...new Set(harnessDefects.flatMap(d => sourceFiles(d.files)))]
-        .filter(path => /^src\/(agent|validator|period|statistics|mcp|replay|fixed-window)\.ts$/.test(path));
+        .filter(path => /^src\/(assignment|agent|validator|period|statistics|mcp|replay|fixed-window)\.ts$/.test(path));
+      if (candidateFiles.includes('src/assignment.ts') && !harnessDefects.some(d =>
+        d.files.includes('src/assignment.ts') && report.goal && initial.scenarios.some(row => row.id === d.scenarioId && row.status === 'PASS')))
+        throw Error('과제 실행기 편집에는 독립 절대시간 검증 계약이 필요합니다.');
       if (!candidateFiles.length || harnessDefects.some(d => !d.files.some(p => candidateFiles.includes(p))))
         throw Error('독립 검증이 지원하는 Harness 실행 소스 경로가 지정되지 않았습니다.');
-      const checks = new Map<string, Awaited<ReturnType<typeof reproduceHarnessFailure>>>();
+      const checks = new Map<string, HarnessCheck>();
       report.harnessChecks = [];
       for (const id of new Set(harnessDefects.map(d => d.scenarioId))) {
         const directory = join(report.directory, `harness-${id}`);
         await mkdir(directory, { mode: 0o700 });
         const row = initial.scenarios.find(s => s.id === id)!;
-        const check = await step(`기존 Harness 실패 재현 · ${id}`, 1,
-          () => services.reproduceHarness(config, row, initial.path, directory));
+        const check = await step<HarnessCheck>(`기존 Harness 실패 재현 · ${id}`, 1, () =>
+          row.status === 'PASS' && report.goal && harnessDefects.some(d => d.scenarioId === id && d.files.includes('src/assignment.ts'))
+            ? reproduceAbsoluteValidation(config, row, directory)
+            : services.reproduceHarness(config, row, initial.path, directory));
         checks.set(id, check);
         report.harnessChecks.push({ id, before: check.before });
       }
@@ -561,7 +583,6 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
           entry: 'agent.js',
           fixtures: [
             { from: options.configPath, to: 'config/harness.json' },
-            { from: join(root, 'runs/f8-e2e/full-20261124T015004Z'), to: 'runs/f8-e2e/full-20261124T015004Z' },
           ],
         }));
       if (!report.build.build.ok || !report.build.regression.ok) throw Error('수정 Harness 빌드 또는 회귀 테스트에 실패했습니다.');
@@ -569,19 +590,25 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
       const buildDigest = await compiledDigest(harnessDist);
       // Use the same MCP source snapshot as the observed failing assignment.
       // Its pending changes remain in the MCP worktree.
-      const baselineDir = await mkdtemp(join(report.directory, 'live-mcp-'));
-      report.baselineBuild ??= await step('독립 실데이터 검증용 MCP 빌드', 1,
-        () => services.prepare(worktree, baselineDir, 0, 1, false, true));
-      if (!report.baselineBuild.build.ok) throw Error('독립 실데이터 검증용 MCP 빌드에 실패했습니다.');
+      if ([...checks.values()].some(check => !('needsLiveCandidate' in check) || check.needsLiveCandidate)) {
+        const baselineDir = await mkdtemp(join(report.directory, 'live-mcp-'));
+        report.baselineBuild ??= await step('독립 실데이터 검증용 MCP 빌드', 1,
+          () => services.prepare(worktree, baselineDir, 0, 1, false, true));
+        if (!report.baselineBuild.build.ok) throw Error('독립 실데이터 검증용 MCP 빌드에 실패했습니다.');
+      }
       for (const check of report.harnessChecks) {
-        check.after = await step(`저장 응답 재생 및 실데이터 독립 재검증 · ${check.id}`, 1,
-          () => checks.get(check.id)!.verify(harnessDist, report.baselineBuild!.candidate));
-        for (const result of check.after) report.after.push(await loadEvidence(result.after.path));
+        check.after = await step<Awaited<ReturnType<HarnessCheck['verify']>>>(`독립 재현 계약 재검증 · ${check.id}`, 1,
+          () => checks.get(check.id)!.verify(harnessDist, report.baselineBuild?.candidate ?? ''));
+        for (const result of check.after) {
+          if (!('synthetic' in result)) report.after.push(await loadEvidence(result.after.path));
+        }
       }
       const assertHarnessResults = async () => {
         if (await compiledDigest(harnessDist) !== buildDigest) throw Error('수정 Harness 빌드 결과가 변경되었습니다.');
         for (const observed of report.after) await checkEvidence(observed);
         for (const check of report.harnessChecks ?? []) {
+          if (check.before.sha256 && sha(await readFile(check.before.path)) !== check.before.sha256)
+            throw Error('수정 전 Harness 재현 증거가 변경되었습니다.');
           for (const result of check.after ?? []) {
             if (sha(await readFile(result.evidence)) !== result.evidenceSha256)
               throw Error('독립 HTTP 검증 증거가 변경되었습니다.');
@@ -591,7 +618,7 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
       await assertHarnessResults();
       await assertHarness(edited);
       report.status = 'VERIFIED';
-      report.reason = '저장 MCP 응답에서 동일 실패를 재현했고 수정 Harness의 반환 기간, 원본 응답, 독립 HTTP 비교 및 기존 회귀 테스트를 확인했습니다.';
+      report.reason = '기존 Harness에서 결함을 재현했고 수정 빌드가 사전 정의된 독립 검증과 기존 회귀 테스트를 통과했습니다.';
       if (!options.allowGitSubmit) {
         report.git.status = '독립 검증 완료 · 제출 대기';
         return;
@@ -619,6 +646,42 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
     if (before.status && !options.resumeMcpAfter) throw Error('코드 수정에는 깨끗한 agent worktree가 필요합니다.');
     const candidateFiles = [...new Set(defects.flatMap(d => sourceFiles(d.files)))];
     if (!options.resumeMcpAfter && defects.some(d => !sourceFiles(d.files).length)) throw Error('AI가 수정 가능한 MCP 소스 경로를 제시하지 않았습니다.');
+
+    const captureIntegrity = async (): Promise<Integrity> => {
+      const runtime = await Promise.all(['src', 'dist', 'tools'].map(path => compiledDigest(join(runtimeRoot, path))));
+      const manifest = await Promise.all(['package.json', 'package-lock.json', 'tsconfig.json']
+        .map(async path => sha(await readFile(join(runtimeRoot, path)))));
+      const entry = await realpath(config.servers.reference);
+      const httpDist = dirname(entry);
+      const http = httpDist.endsWith(sep + 'dist')
+        ? await Promise.all(['dist', 'src'].map(path => compiledDigest(join(dirname(httpDist), path)).catch(error => {
+          if (path === 'src' && error.code === 'ENOENT') return null;
+          throw error;
+        })))
+        : [sha(await readFile(entry))];
+      return { runtime: sha(JSON.stringify([runtimeRoot, runtime, manifest])),
+        config: sha(await readFile(options.configPath)),
+        httpClient: sha(JSON.stringify([entry, http, process.env.WHATAP_HTTP_API_URL ?? null])) };
+    };
+    const baseline = await step('MCP 수정 전 검증 기반 SHA-256 기록', 1, async () => {
+      const snapshot = await captureIntegrity();
+      if (snapshot.config !== configHash) throw Error('실행 중 검증 설정이 변경되었습니다.');
+      await save(report.directory, 'mcp-integrity-baseline.json', json(snapshot));
+      return snapshot;
+    });
+    report.integrity = { baseline, checks: [] };
+    checkIntegrity = async stage => {
+      try {
+        const observed = await captureIntegrity();
+        const unchanged = JSON.stringify(observed) === JSON.stringify(baseline);
+        report.integrity!.checks.push({ stage, observed, unchanged });
+        if (unchanged) return;
+      } catch (error) {
+        report.integrity!.checks.push({ stage, unchanged: false, error: errorMessage(error) });
+      }
+      failure = 'UNVERIFIABLE';
+      throw Error(`검증 기반 무결성을 확인할 수 없습니다 · ${stage} · 현재 증거를 보존합니다.`);
+    };
 
     // An uncertain comparator result is evidence for diagnosis and editing. A
     // separate before/after contrast is required to certify the resulting fix.
@@ -709,6 +772,8 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
     const editedDir = join(report.directory, 'tasks', 'task-00000000-00000003');
     await mkdir(editedDir, { recursive: true, mode: 0o700 });
     await assertUnchanged(before);
+    await checkIntegrity('MCP 편집 시작 직전');
+    mcpEditingStarted = true;
     failure = 'AI_EXECUTION_FAILED';
     let edited: Snapshot;
     if (options.resumeMcpAfter) {
@@ -740,11 +805,13 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
       if (changes.length !== allowedChanges.length || edited.head !== before.head || edited.indexSha256 !== before.indexSha256)
         throw Error('편집 중 승인 범위 밖의 파일 또는 Git 상태가 바뀌었습니다. 변경은 현장 확인을 위해 보존했습니다.');
     }
+    await checkIntegrity('MCP 편집 직후');
     if (!report.changes.length) throw Error('AI 편집에서 소스 변경을 확인하지 못했습니다.');
     await assertUnchanged(edited);
 
     failure = 'VERIFICATION_FAILED';
     report.build = await step('MCP 재빌드 및 기존 테스트', 1, () => services.prepare(worktree, editedDir, 1, 1, true, true));
+    await checkIntegrity('MCP 재빌드 및 회귀 직후');
     if (!report.build.build.ok || !report.build.regression.ok) throw Error('수정 MCP 빌드 또는 기존 테스트에 실패했습니다.');
     const candidateHash = sha(await readFile(report.build.candidate));
     const finalConfig = { ...config, servers: { ...config.servers, candidate: report.build.candidate } };
@@ -753,7 +820,10 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
         () => verify(finalConfig, { scenarioId: baseline.id, ...plan }));
       report.after.push(observed);
       const row = observed.scenarios.find(s => s.id === baseline.id);
-      if (!row) throw Error('독립 검증 시나리오가 누락됐습니다.');
+      if (!row) {
+        failure = 'UNVERIFIABLE';
+        throw Error(`Harness 독립 검증 시나리오가 누락됐습니다 · ${observed.path}`);
+      }
       report.validation.push({
         id: baseline.id, before: baseline.status, after: row.status,
         beforePeriod: baseline.timeWindow, afterPeriod: row.timeWindow,
@@ -795,6 +865,7 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
     if (report.validation.some(r => targetIds.has(r.id) && !absoluteTargets.has(r.id) && r.before !== 'FAIL'))
       throw Error('수정 전 대조에서 대상 MCP의 불일치가 확인되지 않아 변경 효과를 입증하지 못했습니다.');
 
+    await checkIntegrity('최종 검증 완료');
     report.status = 'VERIFIED';
     report.reason = absolutePlans.length
       ? '절대시간 검증과 다섯 시나리오의 독립 대조 및 기존 테스트를 통과했습니다.'
@@ -808,10 +879,16 @@ async function runPipeline(report: AssignmentReport, config: HarnessConfig, opti
     await step('Git 제출', 1, () => services.submit(worktree, before.head, report.changes, report.git, async () => {
       await assertUnchanged(edited);
       for (const observed of report.after) await checkEvidence(observed);
-    }, 'mcp'));
+      await checkIntegrity!('제출 직전');
+    }, 'mcp', () => checkIntegrity!('원격 Push 직전')));
   } catch (error) {
+    let reason = errorMessage(error);
+    if (checkIntegrity && !report.integrity?.checks.some(check => !check.unchanged)) {
+      try { await checkIntegrity('MCP 단계 실패 후'); }
+      catch (integrityError) { reason = `${errorMessage(integrityError)} · 이전 실패 ${reason}`; }
+    }
     report.status = failure;
-    report.reason = errorMessage(error);
+    report.reason = reason;
     if (failure === 'SUBMISSION_FAILED') report.git.error = report.reason;
   }
 }
@@ -832,8 +909,11 @@ function markdown(report: AssignmentReport): string {
     ...(report.related?.deferred ? [`- ${report.related.deferred}`] : []),
     ...(report.harnessChecks ?? []).flatMap(check => [
       `- Harness ${check.id} 수정 전 ${check.before.row.status} / ${check.before.row.reason} [재현 보고서](${check.before.path})`,
-      ...(check.after ?? []).map(result => `- Harness ${check.id} ${result.label} 수정 후 ${result.after.row.status} / ${result.after.row.reason} · 독립 검증 ${result.independent.status} · [실제 원본 데이터](${result.evidence})`),
+      ...(check.after ?? []).map(result => `- Harness ${check.id} ${result.label} 수정 후 ${'synthetic' in result ? '합성 검증 계약' : `${result.after.row.status} / ${result.after.row.reason}`} · 독립 검증 ${result.independent.status} · [검증 증거](${result.evidence})`),
     ]),
+    ...(report.integrity ? ['', '## MCP 수정 구간 무결성', '',
+      ...Object.entries(report.integrity.baseline).map(([component, hash]) => `- ${component} SHA-256 ${hash}`),
+      ...report.integrity.checks.map(check => `- ${check.stage} · ${check.unchanged ? '일치' : '확인 실패'}`)] : []),
     ...(report.goal ? ['', '## 사용자 목표', '', report.goal] : []),
     '', '## 조회 대상 및 조건', '',
     ...report.scenarios.map(s => `- ${s.id} · ${s.description} · 프로젝트 ${s.projectCode} · ${s.mcpPath} · ${s.referenceTool}`),
@@ -888,6 +968,7 @@ export async function runAssignment(options: AssignmentOptions, overrides: Parti
   const goal = options.goalPath === undefined ? priorGoal : (await readFile(options.goalPath, 'utf8')).trim();
   if (goal === '') throw Error('사용자 목표 Markdown 파일이 비어 있습니다.');
   const startedAt = new Date().toISOString();
+  const configHash = sha(await readFile(options.configPath));
   const { config, root } = await loadConfig(options.configPath);
   const outputPath = options.outputDir ?? config.outputDir;
   const output = await realpath(outputPath).catch(async () => {
@@ -918,7 +999,7 @@ export async function runAssignment(options: AssignmentOptions, overrides: Parti
     await withWorkflowLock(output,
       () => runPipeline(report, { ...config, rpcTimeoutMs: Math.min(config.rpcTimeoutMs, 180_000), outputDir: directory, servers: {
         ...config.servers, candidate: join(options.worktree, 'dist', 'index.js'),
-      } }, options, root, services));
+      } }, options, root, services, configHash));
   } catch (error) {
     report.reason = errorMessage(error);
   }

@@ -18,11 +18,15 @@ npm test
 Ubuntu에서 Node.js 22 이상, Harness와 MCP의 설치된 의존성, 빌드된 HTTP Client, 인증된 Codex CLI를 준비합니다. 서비스 조회 인증은 현재 셸의 `WHATAP_API_TOKEN` 및 `WHATAP_HTTP_API_TOKEN`을 사용합니다. 코드 변경은 별도의 깨끗한 `agent` Git worktree에서 수행합니다.
 
 ```bash
-cd /home/ubuntu/wpr/whatap-harness
-node tools/run-assignment.mjs --config config/harness.json --worktree /home/ubuntu/wpr/whatap-open-mcp-agent
+cd /home/ubuntu/wpr/whatap-harness-runtime
+node tools/run-assignment.mjs \
+  --config /home/ubuntu/wpr/whatap-harness/config/harness.json \
+  --output-dir /home/ubuntu/wpr/whatap-harness-runtime/runs \
+  --worktree /home/ubuntu/wpr/whatap-open-mcp-agent \
+  --harness-worktree /home/ubuntu/wpr/whatap-harness-agent
 ```
 
-이 명령은 현재 MCP 소스를 별도 디렉터리에서 빌드하고, 서버 메트릭, APM 트랜잭션·예외 통계, TPS·오류 시계열을 기존 독립 HTTP 비교기로 검증합니다. 다섯 결과와 원본 응답은 판정과 관계없이 읽기 전용 Codex에 전달합니다. 분석은 최대 2회이며, 추가 조회는 최대 2건입니다. 추가 조회는 설정된 프로젝트·도구와 최대 24시간의 과거 구간으로 제한됩니다. MCP 결함으로 분류하고 관련 소스와 독립 조회 근거를 확보한 경우 코드 편집을 1회 실행합니다. 부분 편집이나 검증 실패가 발생하면 편집 내용과 증거를 보존합니다.
+이 명령은 현재 MCP 소스를 별도 디렉터리에서 빌드하고, 서버 메트릭, APM 트랜잭션·예외 통계, TPS·오류 시계열을 기존 독립 HTTP 비교기로 검증합니다. 다섯 결과와 원본 응답은 판정과 관계없이 읽기 전용 Codex에 전달합니다. 분석은 최대 2회이며, 추가 조회는 최대 2건입니다. 추가 조회는 설정된 프로젝트·도구와 최대 24시간의 과거 구간으로 제한됩니다. 독립 재현 근거를 확보한 대상의 코드 편집을 1회 실행합니다. Harness 결함이 함께 확인되면 Harness를 우선 처리합니다. 부분 편집이나 검증 실패가 발생하면 편집 내용과 증거를 보존합니다.
 
 수정 후에는 MCP를 새로 빌드하고 기존 MCP 테스트와 다섯 시나리오의 직접 대조를 실행합니다. 수정 대상의 변경 전 독립 불일치와 변경 후 전체 통과가 확인되어야 `VERIFIED`입니다. `PERIOD_PAIRED`에서는 각 MCP 응답의 관측 기간으로 HTTP를 조회합니다. 전후 기간이 다르면 동일한 행에 대한 재현으로 판정하지 않습니다. `FIXED_WINDOW`에서는 MCP 스키마와 정확한 반환 기간을 검증합니다.
 
@@ -43,7 +47,14 @@ node tools/run-assignment.mjs \
   --allow-git-submit
 ```
 
-과거 `assignment.md`의 동반 `assignment.json`에서 수정 전 보고서 SHA-256을 확인하고, `baseline.json`과 연결된 원본을 읽습니다. 현재 독립 재생 기준은 저장된 MCP 원본의 Markdown과 구조화 기간이 함께 있으며 `MCP_PERIOD_MISSING_OR_INVALID`로 멈춘 경우를 지원합니다. 기존 실행 코드를 통해 실패를 재현한 뒤 별도 빌드 및 전체 회귀를 실행합니다. 저장 응답의 정확한 기간과 현재 MCP 응답의 관측 기간에 대해 실행기가 직접 HTTP를 호출합니다. 실행기가 행, 요약, 기간과 응답 원본을 대조하고 수정 빌드가 같은 결과를 산출하는지 확인합니다. 자동 재현 기준이 없거나 과거 HTTP 데이터가 보존 기간 밖이거나 독립 대조에 실패하면 Git 제출을 진행할 수 없습니다.
+과거 `assignment.md` 또는 `assignment.json`을 지정하면 실행기가 동반 JSON에서 수정 전 보고서 SHA-256을 확인하고, `baseline.json`과 연결된 원본을 읽습니다. 목표 기반 Harness 검증에는 검토한 요구사항 Markdown을 `--goal-file`로 전달합니다.
+
+- **데이터 및 기간 해석 결함**은 원본 MCP 응답으로 기존 판정을 재현하고 실행기가 직접 조회한 독립 HTTP 응답으로 행, 요약, 기간과 원본을 대조합니다. 기간 누락 재현은 저장 및 현재 MCP 응답의 Markdown과 구조화 기간을 교차 확인합니다. 기존 데이터 비교의 실패는 독립 대조가 통과하고 실행 중인 Harness에서 같은 실패를 재현한 경우에 검증할 수 있습니다.
+- **절대시간 검증 기능 결함**은 과제 목표가 있고 기존 단일 MCP/HTTP 대조가 PASS인 상태에서 과제 실행 코드의 문제가 확인된 경우에 적용합니다. 격리된 실행에 성공, 두 번째 조회의 1ms 경계 편차, 두 번째 조회의 데이터 불일치 응답을 주입합니다. 실행 중인 Harness가 실제 조회 요청 인자와 단조 시계 간격을 관찰합니다. 양쪽에 밀리초가 남은 동일 고정 요청을 1초 이상 간격으로 두 번 이상 수행하고, 편차와 비교 실패를 각각 차단해야 합니다. 합성 증거는 과제 실행기의 검증 흐름을 확인하며 서비스 실측은 후속 MCP 과제에서 수행합니다.
+
+모든 Harness 수정은 별도 빌드 및 전체 회귀를 거칩니다. 지원되는 재현 기준을 적용할 수 없거나 독립 증거가 부족하면 제출을 차단합니다. 이전 절대시간 과제를 재현할 때는 위 명령의 `--evidence`에 해당 `assignment.json` 경로를 지정하고, `--goal-file`에 검토한 절대시간 목표 문서를 전달합니다.
+
+MCP 작업 경로는 실행 Runtime 코드, 검증 설정, 독립 HTTP Client의 SHA-256을 편집 전에 기록합니다. 편집 및 빌드 직후, 최종 검증 완료 및 제출 직전에 다시 대조합니다. 이 구간에서 Harness 검증 증거가 깨지거나 무결성 불일치가 확인되면 `UNVERIFIABLE`로 종료하고 로컬 증거와 변경을 보존합니다. 같은 실행에서 Harness 수정으로 전환할 수 없습니다.
 
 `--allow-git-submit`을 사용한 경우에만 검증된 소스를 대상 저장소 `agent`에서 `submission`으로 제출합니다. 원격 및 로컬 worktree가 일치해야 하며 기존 열린 PR은 재사용합니다. 대상은 Harness의 경우 `jtlim/whatap-pr-agent`, MCP의 경우 `jtlim/whatap-open-mcp`입니다. 실제 응답 및 상세 근거는 로컬 아티팩트에 저장되고 PR 본문에는 고정된 요약이 들어갑니다.
 

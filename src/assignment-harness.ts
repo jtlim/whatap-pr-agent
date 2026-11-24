@@ -44,13 +44,18 @@ type Call = { tool: string; args: Record<string, unknown>; result: McpToolResult
 
 export async function reproduceHarnessFailure(config: HarnessConfig, historical: ScenarioReport,
   evidenceFile: string, directory: string) {
-  const scenario = config.scenarios.find(s => s.id === historical.id)!;
+  const definition = config.scenarios.find(s => s.id === historical.id);
+  if (!definition || historical.callResults?.length || historical.mcpTool !== 'whatap_query_data' ||
+      !historical.candidate.file || !historical.candidate.args || !historical.mcpPath)
+    throw Error('이 Harness 결함의 독립 재현 기준이 없습니다.');
+  const scenario = definition;
+  const periodMissing = historical.reason === 'MCP_PERIOD_MISSING_OR_INVALID' && historical.status === 'UNVERIFIABLE';
+  if (!periodMissing && (historical.status !== 'FAIL' || !historical.reference.file))
+    throw Error('이 Harness 결함의 독립 재현 기준이 없습니다.');
   const plan = { scenarioId: scenario.id,
     relativeReplay: { originalArgs: historical.candidate.args!, mcpPath: historical.mcpPath! } };
   const args = relativeReplayArgs(plan.relativeReplay);
-  if (historical.reason !== 'MCP_PERIOD_MISSING_OR_INVALID' || historical.status !== 'UNVERIFIABLE' ||
-      historical.callResults?.length || historical.mcpTool !== 'whatap_query_data' || !historical.candidate.file ||
-      args.projectCode !== scenario.projectCode || !(scenario.allowedMcpPaths ?? [scenario.mcpPath]).includes(historical.mcpPath!))
+  if (args.projectCode !== scenario.projectCode || !(scenario.allowedMcpPaths ?? [scenario.mcpPath]).includes(historical.mcpPath!))
     throw Error('이 Harness 결함의 독립 재현 기준이 없습니다.');
   const raw = await readFile(resolve(dirname(evidenceFile), historical.candidate.file));
   if (hashed(raw) !== historical.candidate.sha256) throw Error('저장된 MCP 원본이 변경되었습니다.');
@@ -88,14 +93,11 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
     return { path, row };
   }
   const historicalCall = { tool: 'whatap_query_data', args, result: saved };
-  const before = await replay(dirname(fileURLToPath(import.meta.url)), historicalCall, [], tools);
-  if (before.row.status !== historical.status || before.row.reason !== historical.reason || before.row.reference.file)
-    throw Error('실행 중인 Harness에서 저장된 실패를 재현하지 못했습니다.');
-
   async function compare(input: Call, label: string) {
     const text = input.result.content?.find(block => block.type === 'text')?.text;
-    const window = input.result.structuredContent as { stime: number; etime: number } | undefined;
+    const structured = input.result.structuredContent as { stime: number; etime: number } | undefined;
     const parsed = typeof text === 'string' ? parseFormattedMcp(text, [...(scenario.matchKeys ?? []), ...(scenario.compareFields ?? [])]) : null;
+    const window = structured ?? (!periodMissing && parsed?.ok ? parsed.data.period : undefined);
     if (input.result.isError || !parsed?.ok || !window || !Number.isSafeInteger(window.stime) ||
         !Number.isSafeInteger(window.etime) || window.stime <= 0 || window.etime <= window.stime ||
         window.etime - window.stime !== expectedDurationMs(String(args.timeRange)) ||
@@ -153,7 +155,13 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
     return { window: { stime: window.stime, etime: window.etime }, calls, verdict, receipt, rowCount: data.rows.length };
   }
 
-  return { before, async verify(dist: string, candidateEntry: string) {
+  const historicalComparison = periodMissing ? undefined : await compare(historicalCall, 'historical');
+  const before = await replay(dirname(fileURLToPath(import.meta.url)), historicalCall, historicalComparison?.calls ?? [], tools);
+  if (before.row.status !== historical.status || before.row.reason !== historical.reason ||
+      (periodMissing && before.row.reference.file))
+    throw Error('실행 중인 Harness에서 저장된 실패를 재현하지 못했습니다.');
+
+  return { before, needsLiveCandidate: true, async verify(dist: string, candidateEntry: string) {
     const liveClient = new StdioMcpClient(candidateEntry, config.rpcTimeoutMs);
     let live: Call;
     let liveTools;
@@ -166,7 +174,7 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
     }
     const results = [];
     for (const [label, input, schema] of [['historical', historicalCall, tools], ['live', live, liveTools]] as const) {
-      const expected = await compare(input, label);
+      const expected = label === 'historical' && historicalComparison ? historicalComparison : await compare(input, label);
       const after = await replay(dist, input, expected.calls, schema);
       if (after.row.status !== 'PASS' || after.row.reason !== expected.verdict.reason ||
           !isDeepStrictEqual(after.row.timeWindow, expected.window) ||

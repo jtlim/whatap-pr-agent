@@ -4,8 +4,8 @@
  */
 import { randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { cp, mkdtemp, readFile, readdir, symlink, stat } from 'node:fs/promises';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { cp, mkdir, mkdtemp, readFile, readdir, symlink, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import { runAgentHarness } from './agent.js';
 import { inspectAgentWorktree } from './phasec.js';
@@ -32,9 +32,9 @@ export type FinalClock={now:()=>number;sleep:(ms:number)=>Promise<unknown>};
 const realClock:FinalClock={now:Date.now,sleep:ms=>pause(ms)};
 
 /** Run a local subprocess with NO service credentials or interactive prompts. */
-async function localCommand(cmd:string,args:string[],cwd:string,limitMs:number):Promise<BuildCheck>{
+export async function localCommand(cmd:string,args:string[],cwd:string,limitMs:number):Promise<BuildCheck>{
   const started=Date.now(),env={...process.env};
-  for(const k of Object.keys(env))if(/^(WHATAP_|AWS_|GH_TOKEN$|GITHUB_TOKEN$|GIT_ASKPASS$|SSH_AUTH_SOCK$)/i.test(k))delete env[k];
+  for(const k of Object.keys(env))if(/^(WHATAP_|AWS_|OPENAI_API_KEY$|GH_TOKEN$|GITHUB_TOKEN$|GIT_ASKPASS$|SSH_AUTH_SOCK$)/i.test(k))delete env[k];
   env.CI='true';env.npm_config_offline='true';env.npm_config_audit='false';env.npm_config_fund='false';
   return await new Promise(resolveResult=>{
     const p=spawn(cmd,args,{cwd,env,stdio:['ignore','pipe','pipe'],shell:false});
@@ -53,10 +53,11 @@ async function localCommand(cmd:string,args:string[],cwd:string,limitMs:number):
  * No dependency download is performed. Existing node_modules are LINKED, not copied;
  * this is not an OS security sandbox, so only trusted package scripts should be run.
  */
-export async function stageAndTestCandidate(worktree:string,taskDir:string,editOrdinal:number,ordinal:number,runRegression=true,copyDependencies=false):Promise<PreparedCandidate>{
+export async function stageAndTestCandidate(worktree:string,taskDir:string,editOrdinal:number,ordinal:number,runRegression=true,copyDependencies=false, inputs?:{entries:string[]; entry:string; fixtures?:Array<{from:string;to:string}>}):Promise<PreparedCandidate>{
   const dir=await mkdtemp(join(taskDir,`final-build-${editOrdinal}-${ordinal}-`));
   const entries=await readdir(worktree,{withFileTypes:true});
   for(const e of entries){
+    if(inputs&&!inputs.entries.includes(e.name))continue;
     if(['.git','node_modules','dist'].includes(e.name)||
       (copyDependencies&&(/^\.env(?:\.|$)/.test(e.name)||['.aws','.codex','.npmrc'].includes(e.name))))continue;
     // Never dereference symlinks while staging. Unknown external links are not safe build inputs.
@@ -71,11 +72,16 @@ export async function stageAndTestCandidate(worktree:string,taskDir:string,editO
   const manifest=JSON.parse(await readFile(join(dir,'package.json'),'utf8')) as {scripts?:Record<string,string>};
   if(!manifest.scripts?.build||!manifest.scripts?.test)throw Error('MCP package must define build and test scripts for Phase D');
   const build=await localCommand('npm',['run','build'],dir,180000);
-  const candidate=join(dir,'dist','index.js');
+  const candidate=join(dir,'dist',inputs?.entry??'index.js');
   // A successful npm exit is insufficient unless a FRESH compiled entry point exists.
   if(!build.ok||!(await stat(candidate).catch(()=>null))?.isFile()){
     return {stageDir:dir,candidate,build:{...build,ok:false,stderr:build.stderr+'\nFRESH_DIST_INDEX_MISSING_OR_BUILD_FAILED'},
       regression:{ok:false,exitCode:null,stdout:'',stderr:'NOT_RUN_BUILD_FAILED',durationMs:0}};
+  }
+  for(const fixture of inputs?.fixtures??[]){
+    const target=join(dir,fixture.to);
+    await mkdir(dirname(target),{recursive:true});
+    await cp(fixture.from,target,{recursive:true,verbatimSymlinks:true});
   }
   const regression=runRegression ? await localCommand('npm',['test'],dir,300000) :
     {ok:false,exitCode:null,stdout:'',stderr:'NOT_RUN_BASELINE_BUILD',durationMs:0};

@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { withExactMcpPeriod } from './period.js';
 import type { Check, McpToolResult, Scenario, Status } from './types.js';
 
 export type JsonRow = Record<string, unknown>;
@@ -18,7 +19,21 @@ export function isWithinTimeWindow(s: Pick<Scenario, 'domain' | 'stime' | 'etime
 }
 
 export function extractContent(result: McpToolResult): unknown {
-  if (result.structuredContent !== undefined) return result.structuredContent;
+  const structured = result.structuredContent;
+  if (structured !== undefined) {
+    // WhaTap MCP puts the exact period in an envelope and the rows in Markdown.
+    // Carry the verified period in the text consumed by comparison and reporting.
+    if (result.isError !== true && structured && typeof structured === 'object' &&
+        Object.keys(structured).length === 2 && 'stime' in structured && 'etime' in structured) {
+      const markdown = result.content?.flatMap(block =>
+        block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n\n');
+      if (markdown) {
+        const exact = withExactMcpPeriod(markdown, structured.stime, structured.etime);
+        if (exact !== null) return exact;
+      }
+    }
+    return structured;
+  }
   const texts = result.content?.filter(c => c.type === 'text' && typeof c.text === 'string') ?? [];
   if (texts.length === 1) {
     try { return JSON.parse(texts[0].text!); } catch { return texts[0].text; }

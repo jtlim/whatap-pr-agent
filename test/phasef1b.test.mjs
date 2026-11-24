@@ -6,7 +6,7 @@ import {join,resolve} from 'node:path';
 import {loadConfig} from '../dist/config.js';
 import {runAgentHarness} from '../dist/agent.js';
 import {fixedReplayArgs,fixedReplayFromBaseline,replayQuerySignature,sameFixedQuery} from '../dist/replay.js';
-const stime=Date.parse('2026-11-22T16:09:46Z'),etime=Date.parse('2026-11-22T16:14:46Z');
+const stime=Date.parse('2026-11-22T16:09:46.001Z'),etime=Date.parse('2026-11-22T16:14:46.987Z');
 const args={projectCode:33194,path:'v2/sys/server_base',timeRange:'5m',limit:150,
   params:{filter:'production'}};
 const before={id:'server-metrics',status:'FAIL',reason:'FIELD_MISMATCH',mcpTool:'whatap_query_data',mcpPath:'v2/sys/server_base',
@@ -14,12 +14,12 @@ const before={id:'server-metrics',status:'FAIL',reason:'FIELD_MISMATCH',mcpTool:
 const replay=fixedReplayFromBaseline(before);
 const good=resolve('test/mock-f1b-good.mjs');
 const ref=resolve('test/mock-f1b-reference.mjs');
-async function run(candidate=good, spec=replay){
+async function run(candidate=good, spec=replay, scenarioId='server-metrics'){
   const dir=await mkdtemp(join(tmpdir(),'phase-f1b-'));
   try {
     const {config}=await loadConfig(resolve('test/fixtures/harness.json'));
     config.outputDir=dir;config.servers={candidate,reference:ref};
-    const r=await runAgentHarness(config,{scenarioId:'server-metrics',fixedReplay:spec,
+    const r=await runAgentHarness(config,{scenarioId,fixedReplay:spec,
       command:'/this-path-does-not-exist/codex'});
     const original=JSON.parse(await readFile(join(r.runDir,'report.json'),'utf8'));
     return {r,original};
@@ -34,6 +34,11 @@ test('F1-B: preserve all non-time args and replace only timeRange with stime/eti
 });
 test('F1-B: direct MCP+HTTP fixed replay is independent of Codex and preserves audit',async()=>{
   const {r,original}=await run();
+  const {r: repeated}=await run();
+  assert.equal(repeated.scenarios[0].status,'PASS',repeated.scenarios[0].candidate.error);
+  assert.deepEqual(repeated.scenarios[0].candidate.args,r.scenarios[0].candidate.args);
+  assert.deepEqual(repeated.scenarios[0].timeWindow,{stime,etime});
+  assert.equal(repeated.fixedReplayAudit.toolCalls,1);
   assert.equal(r.scenarios[0].status,'PASS');
   assert.deepEqual(r.scenarios[0].timeWindow,{stime,etime});
   assert.deepEqual(r.scenarios[0].candidate.args,fixedReplayArgs(replay));
@@ -63,8 +68,11 @@ test('F1-B: no explicit window schema refuses data query and PASS',async()=>{
   assert.equal(r.scenarios[0].reason,'FIXED_REPLAY_SCHEMA_NOT_SUPPORTED');
   assert.equal(r.fixedReplayAudit.toolCalls,0);
 });
-test('F1-B: non-second-aligned historical period is not rounded into false replay',()=>{
-  assert.throws(()=>fixedReplayFromBaseline({...before,timeWindow:{stime:stime+1,etime}}),/cannot be replayed/);
+test('F1-B: historical milliseconds survive baseline reconstruction and replay arguments',()=>{
+  const window={stime:stime+1,etime};
+  const reconstructed=fixedReplayFromBaseline({...before,timeWindow:window});
+  assert.deepEqual(reconstructed.window,window);
+  assert.deepEqual(fixedReplayArgs(reconstructed),{...fixedReplayArgs(replay),...window});
 });
 test('F1-B: missing, contradictory, or malicious original time arguments rejected',()=>{
   assert.throws(()=>fixedReplayFromBaseline({...before,candidate:{args:{...args,stime}}}),/cannot be replayed/);
@@ -86,6 +94,10 @@ test('F1-B: query fingerprint ignores time mode only, not params/limit/path/reas
   assert.notEqual(fingerprint(before),fingerprint({...fixed,candidate:{args:{...fixedReplayArgs(replay),params:{filter:'staging'}}}}));
 });
 test('F1-B: replay refuses mismatched source and unknown scenario without network calls',async()=>{
-  await assert.rejects(()=>run(good,{...replay,window:{stime:stime+1,etime}}),/Invalid fixed-window replay request/);
+  for (const window of [{stime,etime:stime},{stime,etime:stime-1},{stime:stime+0.5,etime},{stime:0,etime}]) {
+    await assert.rejects(()=>run(good,{...replay,window}),/Invalid fixed-window replay request/);
+  }
+  await assert.rejects(()=>run(good,replay,'unknown'),/requires one known scenario/);
+  await assert.rejects(()=>run(good,{...replay,mcpPath:'other',originalArgs:{...args,path:'other'}}),/not allowed by fixed scenario/);
   await assert.rejects(()=>run(good,{...replay,originalArgs:{...args,path:'other'}}),/Invalid fixed-window replay request/);
 });

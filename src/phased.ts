@@ -3,8 +3,9 @@
  * An on-disk built artifact is created in an isolated staging COPY of the agent worktree.
  */
 import { randomUUID, createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { spawn } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, readdir, symlink, stat } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, symlink, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import { runAgentHarness } from './agent.js';
@@ -25,26 +26,40 @@ const within=(root:string,p:string)=>{const r=relative(resolve(root),resolve(p))
 const cleanSecret=(v:string)=>[process.env.WHATAP_API_TOKEN,process.env.WHATAP_HTTP_API_TOKEN]
   .filter((x):x is string=>!!x).reduce((s,k)=>s.replaceAll(k,'[REDACTED]'),v);
 
-export type BuildCheck={ok:boolean;exitCode:number|null;stdout:string;stderr:string;durationMs:number};
+export type BuildCheck={ok:boolean;exitCode:number|null;stdout:string;stderr:string;durationMs:number;unavailable?:boolean};
 export type PreparedCandidate={stageDir:string;candidate:string;build:BuildCheck;regression:BuildCheck};
 export type PrepareFn=(worktree:string,taskDir:string,editOrdinal:number,attemptOrdinal:number)=>Promise<PreparedCandidate>;
 export type FinalClock={now:()=>number;sleep:(ms:number)=>Promise<unknown>};
 const realClock:FinalClock={now:Date.now,sleep:ms=>pause(ms)};
 
 /** Run a local subprocess with NO service credentials or interactive prompts. */
-export async function localCommand(cmd:string,args:string[],cwd:string,limitMs:number):Promise<BuildCheck>{
+export async function localCommand(cmd:string,args:string[],cwd:string,limitMs:number, log?:{path:string;redact:(value:string)=>string}):Promise<BuildCheck>{
   const started=Date.now(),env={...process.env};
   for(const k of Object.keys(env))if(/^(WHATAP_|AWS_|OPENAI_API_KEY$|GH_TOKEN$|GITHUB_TOKEN$|GIT_ASKPASS$|SSH_AUTH_SOCK$)/i.test(k))delete env[k];
   env.CI='true';env.npm_config_offline='true';env.npm_config_audit='false';env.npm_config_fund='false';
-  return await new Promise(resolveResult=>{
+  return await new Promise<BuildCheck>((resolveResult,reject)=>{
     const p=spawn(cmd,args,{cwd,env,stdio:['ignore','pipe','pipe'],shell:false});
     let stdout='',stderr='',overLimit=false,timedOut=false,finished=false;
     const timer=setTimeout(()=>{timedOut=true;p.kill('SIGTERM');setTimeout(()=>p.kill('SIGKILL'),2000).unref();},limitMs);
-    p.stdout.on('data',(b:Buffer)=>{stdout+=b.toString();if(stdout.length>1024*1024){stdout=stdout.slice(-1024*1024);overLimit=true;}});
-    p.stderr.on('data',(b:Buffer)=>{stderr+=b.toString();if(stderr.length>1024*1024){stderr=stderr.slice(-1024*1024);overLimit=true;}});
+    const outDecoder=new StringDecoder('utf8'), errDecoder=new StringDecoder('utf8');
+    const append=(text:string,chunk:string)=>{
+      const combined=text+chunk;
+      if(combined.length<=1024*1024)return combined;
+      overLimit=true;
+      return log?combined:combined.slice(-1024*1024);
+    };
+    p.stdout.on('data',(b:Buffer)=>{stdout=append(stdout,outDecoder.write(b));});
+    p.stderr.on('data',(b:Buffer)=>{stderr=append(stderr,errDecoder.write(b));});
     const done=(code:number|null,err?:string)=>{if(finished)return;finished=true;clearTimeout(timer);
-      resolveResult({ok:code===0&&!timedOut&&!overLimit,exitCode:code,
-        stdout:cleanSecret(stdout).slice(-12000),stderr:cleanSecret((err??'')+stderr).slice(-12000),durationMs:Date.now()-started});};
+      const redact=log?.redact??cleanSecret;
+      const output={ok:code===0&&!timedOut&&!overLimit,exitCode:code,
+        stdout:redact(stdout+outDecoder.end()),stderr:redact((err??'')+stderr+errDecoder.end()),durationMs:Date.now()-started,
+        ...(log?{unavailable:code===null||timedOut||overLimit}:{})};
+      const summary={...output,stdout:output.stdout.slice(-12000),stderr:output.stderr.slice(-12000)};
+      if(log)writeFile(log.path,JSON.stringify(output,null,2)+'\n',{flag:'wx',mode:0o600})
+        .then(()=>resolveResult(summary),reject);
+      else resolveResult(summary);
+    };
     p.once('error',e=>done(null,String(e)));
     p.once('close',c=>done(c));
   });
@@ -53,7 +68,7 @@ export async function localCommand(cmd:string,args:string[],cwd:string,limitMs:n
  * No dependency download is performed. Existing node_modules are LINKED, not copied;
  * this is not an OS security sandbox, so only trusted package scripts should be run.
  */
-export async function stageAndTestCandidate(worktree:string,taskDir:string,editOrdinal:number,ordinal:number,runRegression=true,copyDependencies=false, inputs?:{entries:string[]; entry:string; fixtures?:Array<{from:string;to:string}>}):Promise<PreparedCandidate>{
+export async function stageAndTestCandidate(worktree:string,taskDir:string,editOrdinal:number,ordinal:number,runRegression=true,copyDependencies=false, inputs?:{entries:string[]; entry:string; fixtures?:Array<{from:string;to:string}>}, redactLog?:(value:string)=>string):Promise<PreparedCandidate>{
   const dir=await mkdtemp(join(taskDir,`final-build-${editOrdinal}-${ordinal}-`));
   const entries=await readdir(worktree,{withFileTypes:true});
   for(const e of entries){
@@ -71,7 +86,8 @@ export async function stageAndTestCandidate(worktree:string,taskDir:string,editO
   }
   const manifest=JSON.parse(await readFile(join(dir,'package.json'),'utf8')) as {scripts?:Record<string,string>};
   if(!manifest.scripts?.build||!manifest.scripts?.test)throw Error('MCP package must define build and test scripts for Phase D');
-  const build=await localCommand('npm',['run','build'],dir,180000);
+  const build=await localCommand('npm',['run','build'],dir,180000,
+    redactLog && {path:join(taskDir,'build.json'),redact:redactLog});
   const candidate=join(dir,'dist',inputs?.entry??'index.js');
   // A successful npm exit is insufficient unless a FRESH compiled entry point exists.
   if(!build.ok||!(await stat(candidate).catch(()=>null))?.isFile()){
@@ -83,7 +99,8 @@ export async function stageAndTestCandidate(worktree:string,taskDir:string,editO
     await mkdir(dirname(target),{recursive:true});
     await cp(fixture.from,target,{recursive:true,verbatimSymlinks:true});
   }
-  const regression=runRegression ? await localCommand('npm',['test'],dir,300000) :
+  const regression=runRegression ? await localCommand('npm',['test'],dir,300000,
+    redactLog && {path:join(taskDir,'regression.json'),redact:redactLog}) :
     {ok:false,exitCode:null,stdout:'',stderr:'NOT_RUN_BASELINE_BUILD',durationMs:0};
   return {stageDir:dir,candidate,build,regression};
 }

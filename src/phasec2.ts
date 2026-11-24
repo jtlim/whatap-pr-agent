@@ -14,7 +14,7 @@ const hex=(x:string)=>createHash('sha256').update(x).digest('hex');
 const now=()=>new Date().toISOString();
 const allowedSource=/^(?:src|lib|app|server|packages\/[^/]+\/src)\/.+\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|py)$/;
 const allowedTest=/(?:^|\/)(?:test|tests|__tests__)\/.+\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts|py|json)$/;
-const pathSafe=(x:string)=>x!=='' && !isAbsolute(x) && !x.includes('\\') &&
+export const pathSafe=(x:string)=>x!=='' && !isAbsolute(x) && !x.includes('\\') &&
   !x.split('/').some(p=>!p || p==='.' || p==='..') && !x.includes('\0') && x.length<512;
 const quote=(x:string)=>x.replaceAll('|','\\|').replaceAll('\n',' ');
 export type EditResult={summary:string;rationale:string;testsRun:string[];risks:string[]};
@@ -73,9 +73,9 @@ export async function snapshotWorktree(path:string):Promise<Snapshot>{
   return {files,root:worktree.path,head:worktree.head,status:worktree.status,indexSha256:hex(index.toString('base64'))};
 }
 function snapshotSha(s:Snapshot):string{return hex(JSON.stringify(s));}
-export function pathsAllowed(before:Snapshot,after:Snapshot,candidates:string[]):{changes:string[];forbidden:string[]}{
+export function pathsAllowed(before:Snapshot,after:Snapshot,scope:string[]|((path:string)=>boolean)):{changes:string[];forbidden:string[]}{
   const changes=allChanged(before,after);
-  return {changes,forbidden:changes.filter(p=>!whitelisted(p,candidates)||
+  return {changes,forbidden:changes.filter(p=>!(typeof scope==='function'?scope(p):whitelisted(p,scope))||
     after.files[p]?.startsWith('symlink:')||before.files[p]?.startsWith('symlink:'))};
 }
 const editorSchema={type:'object',additionalProperties:false,

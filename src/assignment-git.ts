@@ -40,7 +40,8 @@ type Receipt = { status: string; commit?: string; pr?: string };
 
 export async function submitAssignment(worktree: string, head: string,
   changes: Array<{ path: string; after: string | null }>, receipt: Receipt,
-  assertVerifiedSource: () => Promise<void>, target: AssignmentTarget = 'mcp', assertIntegrity?: () => Promise<void>): Promise<void> {
+  assertVerifiedSource: () => Promise<void>, target: AssignmentTarget = 'mcp', assertIntegrity?: () => Promise<void>, body?: string): Promise<void> {
+  if (!body?.trim() || body.length > 60_000 || Buffer.byteLength(body) > 110_000) throw Error('검증된 PR 본문이 없거나 크기 제한을 초과했습니다.');
   if ((await checkAssignmentRepository(worktree, target)).head !== head) throw Error('제출할 worktree HEAD가 변경되었습니다.');
   const repository = repositories[target];
   const url = `https://github.com/${repository}.git`;
@@ -102,11 +103,15 @@ export async function submitAssignment(worktree: string, head: string,
   if (!open.length) {
     await gh('pr', 'create', '--base', 'submission', '--head', 'agent',
       '--title', title,
-      '--body', 'The harness rebuilt the candidate, ran the existing tests, and verified MCP responses against an independent HTTP client. Detailed data and logs are retained locally.');
+      '--body', body).catch(() => { throw Error('GitHub PR 생성에 실패했습니다.'); });
   }
   const prs = await listPrs();
   if (prs.length !== 1 || !validPr(prs[0], commit))
     throw Error('원격 push 이후 대상 PR을 확인하지 못했습니다.');
   receipt.pr = prs[0].url;
+  if (open.length) {
+    if (prs[0].url !== open[0].url) throw Error('갱신할 PR이 실행 중 변경되었습니다.');
+    await gh('pr', 'edit', prs[0].url, '--body', body).catch(() => { throw Error('GitHub PR 본문 갱신에 실패했습니다.'); });
+  }
   receipt.status = 'PR 확인 완료';
 }

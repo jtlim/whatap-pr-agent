@@ -5,7 +5,7 @@ export type FixedWindow = {stime:number;etime:number};
 export type FixedReplay = { originalArgs:Record<string,unknown>; mcpPath:string; window:FixedWindow };
 const isObj=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 const validWindow=(w:FixedWindow):boolean=>Number.isSafeInteger(w.stime)&&Number.isSafeInteger(w.etime)&&
-  w.stime>0&&w.etime>w.stime&&w.stime%1000===0&&w.etime%1000===0;
+  w.stime>0&&w.etime>w.stime;
 const omitTime=(args:Record<string,unknown>)=>Object.keys(args).filter(x=>!['timeRange','stime','etime'].includes(x))
   .sort().map(k=>[k,args[k]] as [string,unknown]);
 

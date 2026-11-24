@@ -235,25 +235,27 @@ async function compareOne(refClient:StdioMcpClient,s:Scenario,r:ScenarioReport,r
   const parsed=parseFormattedMcp(text,[...(s.matchKeys??[]),...(s.compareFields??[])]);
   if(!parsed.ok){r.reason=parsed.reason;return;}
   const data=parsed.data;
-  r.candidate.period=data.period.label;r.candidate.parsedRows=data.rows.length;
-  r.candidate.comparisonPrecision='표시 수치(실수 소수점 2자리) 기준';
-  r.timeWindow={stime:data.period.stime,etime:data.period.etime};
-  // Verify the exact requested period BEFORE any independent HTTP call. The
-  // existing Markdown Period contains seconds only; F1-B therefore refuses
-  // source windows with sub-second precision rather than rounding them.
-  if(fixedWindow&&(data.period.stime!==fixedWindow.stime||data.period.etime!==fixedWindow.etime)){
-    r.reason='FIXED_REPLAY_PERIOD_MISMATCH';return;
-  }
-  const actualDuration=expectedDurationMs(String(call.arguments.timeRange??''));
-  if(actualDuration!==null && data.period.etime-data.period.stime!==actualDuration){
-    r.reason='MCP_PERIOD_DURATION_MISMATCH';return;
+  // Bind independent HTTP requests to the validated candidate period.
+  const {stime,etime,timeRange}=call.arguments;
+  if(fixedWindow || stime!==undefined || etime!==undefined){
+    const expected=fixedWindow??{stime,etime};
+    if(data.period.stime!==expected.stime||data.period.etime!==expected.etime){
+      r.reason=fixedWindow?'FIXED_REPLAY_PERIOD_MISMATCH':'MCP_REQUESTED_WINDOW_MISMATCH';return;
+    }
+  }else if(timeRange!==undefined){
+    const duration=typeof timeRange==='string'?expectedDurationMs(timeRange):null;
+    if(duration===null || data.period.etime-data.period.stime!==duration){
+      r.reason='MCP_PERIOD_DURATION_MISMATCH';return;
+    }
   }
   if(!authorizedPath(s,call.arguments)){r.reason='MCP_METRIC_MAPPING_UNVERIFIED';return;}
-  // Candidate times must be plausible; exact API query is bound to candidate period.
   const effective={...s,stime:data.period.stime,etime:data.period.etime};
   if(!data.rows.every(row=>isWithinTimeWindow(effective,row.time))){
     r.reason='MCP_ROWS_OUTSIDE_PERIOD';return;
   }
+  r.candidate.period=data.period.label;r.candidate.parsedRows=data.rows.length;
+  r.candidate.comparisonPrecision='표시 수치(실수 소수점 2자리) 기준';
+  r.timeWindow={stime:effective.stime,etime:effective.etime};
   if(s.statisticsMode){
     // Keep the raw same-path HTTP read isolated from Codex. Compare ALL visible
     // MCP fields first; independently aggregate the complete HTTP MXQL result

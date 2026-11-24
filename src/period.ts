@@ -1,6 +1,6 @@
 import type { JsonRow } from './validator.js';
 
-/** The candidate WhaTap MCP currently renders its Period and `time` column at whole-second precision. */
+/** MCP table timestamps are rendered at whole-second precision. */
 export interface FormattedMcpData {
   period: { label: string; stime: number; etime: number };
   rows: JsonRow[];
@@ -9,7 +9,8 @@ export interface FormattedMcpData {
 }
 
 const UTC_TIME = '(\\d{4}-\\d{2}-\\d{2})[ T](\\d{2}:\\d{2}:\\d{2}) UTC';
-const PERIOD_RE = new RegExp('\\*\\*Period\\*\\*:\\s*' + UTC_TIME + '\\s*(?:→|->|to)\\s*' + UTC_TIME, 'i');
+const PERIOD_TIME = UTC_TIME.replace(' UTC', '(?:\\.(\\d{3}))? UTC');
+const PERIOD_RE = new RegExp('\\*\\*Period\\*\\*:\\s*' + PERIOD_TIME + '\\s*(?:→|->|to)\\s*' + PERIOD_TIME, 'i');
 const CELL_TIME_RE = new RegExp('^' + UTC_TIME + '$');
 
 function utcMillis(date: string, time: string): number | null {
@@ -21,9 +22,26 @@ function utcMillis(date: string, time: string): number | null {
 export function parseMcpPeriod(text: string): FormattedMcpData['period'] | null {
   const m = PERIOD_RE.exec(text);
   if (!m) return null;
-  const stime = utcMillis(m[1], m[2]), etime = utcMillis(m[3], m[4]);
-  if (stime === null || etime === null || etime <= stime) return null;
+  const start = utcMillis(m[1], m[2]), end = utcMillis(m[4], m[5]);
+  if (start === null || end === null) return null;
+  const stime = start + Number(m[3] ?? 0), etime = end + Number(m[6] ?? 0);
+  if (etime <= stime) return null;
   return { label: m[0], stime, etime };
+}
+
+/** Reconcile the MCP period envelope with the displayed UTC seconds. */
+export function withExactMcpPeriod(text: string, stime: unknown, etime: unknown): string | null {
+  if (typeof stime !== 'number' || typeof etime !== 'number' ||
+      !Number.isSafeInteger(stime) || !Number.isSafeInteger(etime) ||
+      stime <= 0 || etime <= stime) return null;
+  const match = PERIOD_RE.exec(text);
+  if (!match || PERIOD_RE.test(text.slice(match.index + match[0].length))) return null;
+  const start = utcMillis(match[1], match[2]), end = utcMillis(match[4], match[5]);
+  if (start !== Math.floor(stime / 1000) * 1000 || end !== Math.floor(etime / 1000) * 1000 ||
+      (match[3] !== undefined && stime % 1000 !== Number(match[3])) ||
+      (match[6] !== undefined && etime % 1000 !== Number(match[6]))) return null;
+  const utc = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', ' UTC');
+  return text.replace(PERIOD_RE, `**Period**: ${utc(stime)} → ${utc(etime)}`);
 }
 
 function splitCells(line: string): string[] {
@@ -93,7 +111,10 @@ export function forMcpDisplay(reference: JsonRow[], fields: string[]): JsonRow[]
 }
 
 export function expectedDurationMs(expr: string): number | null {
-  const m = /^(\d+)\s*([smhdw])$/.exec(expr);
+  const normalized = expr.trim().toLowerCase();
+  const m = /^(\d+)\s*([smhdw])$/.exec(normalized) ??
+    /^(?:last\s+)?(\d+)\s+(second|minute|hour|day|week)s?$/.exec(normalized);
   if (!m) return null;
-  return Number(m[1]) * ({s:1000,m:60000,h:3600000,d:86400000,w:604800000}[m[2]] ?? 0);
+  const duration = Number(m[1]) * ({s:1000,m:60000,h:3600000,d:86400000,w:604800000}[m[2][0]] ?? 0);
+  return Number.isSafeInteger(duration) && duration > 0 ? duration : null;
 }

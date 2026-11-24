@@ -12,6 +12,10 @@ import { alignedStatsWindow, analyzeStats } from './statistics.js';
 import type { HarnessConfig, McpToolResult, RunReport, ScenarioReport } from './types.js';
 import { assessReference, extractContent, isWithinTimeWindow, verifyReferenceRequest } from './validator.js';
 
+export class HarnessVerificationFailure extends Error {
+  constructor(message: string, readonly evidencePaths: string[]) { super(message); }
+}
+
 const runner = `
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -64,8 +68,8 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
 
   // Runs the unchanged and candidate implementations over the same recorded observation.
   // The controller owns the HTTP calls, replay inputs, and acceptance checks.
-  async function replay(dist: string, input: Call, expected: Call[], schema: unknown) {
-    const outputDir = await mkdtemp(join(directory, 'harness-replay-'));
+  async function replay(dist: string, input: Call, expected: Call[], schema: unknown, evidenceDir = directory) {
+    const outputDir = await mkdtemp(join(evidenceDir, 'harness-replay-'));
     const driver = join(outputDir, 'replay.mjs');
     const fixture = join(outputDir, 'fixture.json');
     await writeFile(driver, runner, { mode: 0o600 });
@@ -93,7 +97,7 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
     return { path, row };
   }
   const historicalCall = { tool: 'whatap_query_data', args, result: saved };
-  async function compare(input: Call, label: string) {
+  async function compare(input: Call, label: string, evidenceDir = directory) {
     const text = input.result.content?.find(block => block.type === 'text')?.text;
     const structured = input.result.structuredContent as { stime: number; etime: number } | undefined;
     const parsed = typeof text === 'string' ? parseFormattedMcp(text, [...(scenario.matchKeys ?? []), ...(scenario.compareFields ?? [])]) : null;
@@ -116,7 +120,7 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
       if (result.isError) throw Error('독립 HTTP 도구가 오류를 반환했습니다.');
       return extractContent(result);
     };
-    const receipt = join(directory, `${label}.json`);
+    const receipt = join(evidenceDir, `${label}.json`);
     try {
       await reference.start();
       if (scenario.statisticsMode) {
@@ -161,7 +165,8 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
       (periodMissing && before.row.reference.file))
     throw Error('실행 중인 Harness에서 저장된 실패를 재현하지 못했습니다.');
 
-  return { before, needsLiveCandidate: true, async verify(dist: string, candidateEntry: string) {
+  return { before, needsLiveCandidate: true, async verify(dist: string, candidateEntry: string, attemptDirectory: string) {
+    const evidenceDir = await mkdtemp(join(attemptDirectory, 'harness-verification-'));
     const liveClient = new StdioMcpClient(candidateEntry, config.rpcTimeoutMs);
     let live: Call;
     let liveTools;
@@ -174,12 +179,8 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
     }
     const results = [];
     for (const [label, input, schema] of [['historical', historicalCall, tools], ['live', live, liveTools]] as const) {
-      const expected = label === 'historical' && historicalComparison ? historicalComparison : await compare(input, label);
-      const after = await replay(dist, input, expected.calls, schema);
-      if (after.row.status !== 'PASS' || after.row.reason !== expected.verdict.reason ||
-          !isDeepStrictEqual(after.row.timeWindow, expected.window) ||
-          !after.row.candidate.period || after.row.candidate.parsedRows !== expected.rowCount)
-        throw Error(`수정 Harness 판정이 독립 검증과 다릅니다 · ${scenario.id} · ${label} · ${after.path} · ${expected.receipt}`);
+      const expected = label === 'historical' && historicalComparison ? historicalComparison : await compare(input, label, evidenceDir);
+      const after = await replay(dist, input, expected.calls, schema, evidenceDir);
       const metas = [after.row.reference.statistics?.mxql,
         after.row.reference.boundaryAlignment?.original ?? after.row.reference,
         ...(after.row.reference.boundaryAlignment?.attempts ?? [])].filter(Boolean);
@@ -191,6 +192,11 @@ export async function reproduceHarnessFailure(config: HarnessConfig, historical:
         if (hashed(bytes) !== meta!.sha256 || !isDeepStrictEqual(JSON.parse(bytes.toString()), expected.calls[i].result))
           throw Error('수정 Harness가 기록한 HTTP 원본이 독립 조회와 다릅니다.');
       }
+      if (after.row.status !== 'PASS' || after.row.reason !== expected.verdict.reason ||
+          !isDeepStrictEqual(after.row.timeWindow, expected.window) ||
+          !after.row.candidate.period || after.row.candidate.parsedRows !== expected.rowCount)
+        throw new HarnessVerificationFailure(`수정 Harness 판정이 독립 검증과 다릅니다 · ${scenario.id} · ${label} · ${after.row.status}/${after.row.reason} · ${after.path} · ${expected.receipt}`,
+          [...results.flatMap(result => [result.after.path, result.evidence]), after.path, expected.receipt]);
       results.push({ label, after, independent: expected.verdict, evidence: expected.receipt,
         evidenceSha256: hashed(await readFile(expected.receipt)) });
     }

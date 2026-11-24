@@ -45,7 +45,11 @@ if (program === 'git' && args.includes('ls-remote') && !args.includes('--get-url
   if (args.at(-2) !== ${JSON.stringify(url)} || !/^[a-f0-9]+:refs\\/heads\\/agent$/.test(args.at(-1))) process.exit(11);
   state.head = args.at(-1).split(':')[0];
 } else if (program === 'gh') {
-  if (args.at(-1) !== ${JSON.stringify('github.com/' + repository)} || !args.includes('agent') || !args.includes('submission')) process.exit(12);
+  if (args.at(-1) !== ${JSON.stringify('github.com/' + repository)}) process.exit(12);
+  if (args.includes('edit') && !args.includes(${JSON.stringify(pr)})) process.exit(13);
+  if (!args.includes('edit') && (!args.includes('agent') || !args.includes('submission'))) process.exit(14);
+  if (args.includes('create') || args.includes('edit')) state.body = args[args.indexOf('--body') + 1];
+  if (args.includes('edit')) state.edited = true;
   if (args.includes('create')) state.created++;
   if (args.includes('list')) fs.writeSync(1, JSON.stringify(state.created ? [{url: ${JSON.stringify(pr)}, headRefOid: state.head, isCrossRepository: false}] : []));
 } else {
@@ -66,13 +70,19 @@ fs.writeFileSync(path, JSON.stringify(state));
     const after = 'after\n';
     await writeFile(join(tree, file), after);
     const changes = [{ path: file, after }];
-    await assert.rejects(submitAssignment(tree, head, changes, { status: '' }, async () => {}, target), /origin/);
+    const report = '# WhaTap 품질 개선 보고서\n\n## 독립 검증';
+    await assert.rejects(submitAssignment(tree, head, changes, { status: '' }, async () => {}, target), /PR 본문/);
+    assert.equal(await git(tree, 'rev-parse', 'HEAD'), head);
+    await assert.rejects(submitAssignment(tree, head, changes, { status: '' }, async () => {}, target, undefined, report), /origin/);
     assert.equal(await git(tree, 'rev-parse', 'HEAD'), head);
     await git(repo, 'remote', 'set-url', 'origin', url);
     const receipt = { status: '' };
-    await submitAssignment(tree, head, changes, receipt, async () => {}, target);
+    await submitAssignment(tree, head, changes, receipt, async () => {}, target, undefined, report);
     assert.equal(receipt.pr, pr);
     assert.equal(receipt.commit, await git(tree, 'rev-parse', 'HEAD'));
-    assert.equal(JSON.parse(await readFile(state, 'utf8')).created, 1);
+    const observed = JSON.parse(await readFile(state, 'utf8'));
+    assert.equal(observed.created, 1);
+    assert.equal(observed.body, report);
+    assert.equal(!!observed.edited, target === 'harness');
   });
 }

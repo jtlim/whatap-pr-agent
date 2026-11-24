@@ -3,6 +3,7 @@ import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { HarnessVerificationFailure } from './assignment-harness.js';
 import { localCommand } from './phased.js';
 import type { HarnessConfig, ScenarioReport } from './types.js';
 
@@ -50,7 +51,7 @@ const report = await runAssignment({ configPath, goalPath, worktree, allowGitSub
     const legacy = fixed && !candidate;
     // Keep PASS and the audit flag in the drift case to test cross-checking of the returned window.
     const drift = fixed && candidate && calls === 1 && mode === 'drift';
-    const mismatch = fixed && candidate && calls === 1 && mode === 'mismatch';
+    const mismatch = fixed && candidate && calls % 2 === 1 && mode === 'mismatch';
     const runDir = join(config.outputDir, 'fixture-' + trace.length);
     await mkdir(runDir);
     const evidence = JSON.parse(await readFile(baseline));
@@ -73,7 +74,7 @@ const report = await runAssignment({ configPath, goalPath, worktree, allowGitSub
     const row = { ...original, timeWindow, candidate: { ...meta, args: replayArgs }, reference: mismatch ? await differentEvidence() : meta,
       status: legacy || drift ? 'UNVERIFIABLE' : mismatch ? 'FAIL' : 'PASS',
       reason: legacy ? 'FIXED_REPLAY_SCHEMA_NOT_SUPPORTED' : drift ? 'FIXED_REPLAY_PERIOD_MISMATCH' :
-        mismatch ? 'FIELD_VALUE_MISMATCH' : 'MATCHING_DATA' };
+        mismatch ? 'FIELD_MISMATCH' : 'MATCHING_DATA' };
     await writeFile(join(runDir, 'report.json'), JSON.stringify({ scenarios: [row], ...(fixed ? {
       fixedReplayAudit: { toolCalls: legacy ? 0 : 1, schemaVerdict: legacy ? 'NO_EXPLICIT_WINDOW' : 'SCHEMA_CANDIDATE',
         periodMatched: !legacy, requestedWindow: fixed.window },
@@ -104,10 +105,10 @@ export async function reproduceAbsoluteValidation(config: HarnessConfig, histori
   const entry = join(directory, 'replay.mjs');
   await writeFile(entry, driver, { mode: 0o600 });
 
-  async function observe(dist: string, label: string, mode: 'stable' | 'drift' | 'mismatch') {
-    const target = join(directory, label);
+  async function observe(dist: string, label: string, mode: 'stable' | 'drift' | 'mismatch', evidenceDir = directory) {
+    const target = join(evidenceDir, label);
     await mkdir(target, { mode: 0o700 });
-    const runtime = join(directory, label + '-runtime');
+    const runtime = join(evidenceDir, label + '-runtime');
     await mkdir(runtime, { mode: 0o700 });
     await Promise.all([
       cp(dist, join(runtime, 'dist'), { recursive: true }),
@@ -142,7 +143,7 @@ export async function reproduceAbsoluteValidation(config: HarnessConfig, histori
     const path = join(target, 'observation.json');
     await mkdir(output);
     const execution = await localCommand(process.execPath, ['--permission',
-      `--allow-fs-read=${directory}`, `--allow-fs-write=${output}`, `--allow-fs-write=${path}`,
+      `--allow-fs-read=${directory}`, `--allow-fs-read=${evidenceDir}`, `--allow-fs-write=${output}`, `--allow-fs-write=${path}`,
       entry, join(runtime, 'dist'), target, mode], target, 60_000);
     if (!execution.ok) throw Error('격리된 절대시간 검증 계약 실행 실패 · ' + execution.stderr);
     const observation = JSON.parse(await readFile(path, 'utf8')) as Observation;
@@ -163,14 +164,14 @@ export async function reproduceAbsoluteValidation(config: HarnessConfig, histori
   const before = await observe(beforeDist, 'before-stable', 'stable');
   if (before.contractMet || before.observation.status !== 'VERIFIED')
     throw Error(`기존 데이터 비교는 통과하고 절대시간 검증 계약은 실패하는 기준을 재현하지 못했습니다. · ${before.path}`);
-  return { before: { path: before.path, row: historical, sha256: digest(await readFile(before.path)) }, needsLiveCandidate: false, async verify(dist: string) {
+  return { before: { path: before.path, row: historical, sha256: digest(await readFile(before.path)) }, needsLiveCandidate: false, async verify(dist: string, _candidate: string, attemptDirectory: string) {
     const results = [];
     for (const mode of ['stable', 'drift', 'mismatch'] as const) {
-      const after = await observe(dist, `after-${mode}`, mode);
+      const after = await observe(dist, `after-${mode}`, mode, attemptDirectory);
       const accepted = mode === 'stable' ? after.observation.status === 'VERIFIED' :
         mode === 'drift' ? after.observation.status === 'UNVERIFIABLE' :
           after.observation.status === 'VERIFICATION_FAILED';
-      if (!after.contractMet || !accepted) throw Error(`절대시간 독립 검증 계약 실패 · ${mode} · ${after.path}`);
+      if (!after.contractMet || !accepted) throw new HarnessVerificationFailure(`절대시간 독립 검증 계약 실패 · ${mode} · ${after.path}`, [after.path]);
       results.push({ label: mode, after: { path: after.path, row: historical }, independent: {
         status: 'PASS', reason: 'ABSOLUTE_VALIDATION_CONTRACT',
       }, evidence: after.path, evidenceSha256: digest(await readFile(after.path)), synthetic: true });
